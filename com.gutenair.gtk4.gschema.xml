@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist gettext-domain="gutenair">
+  <schema id="com.gutenair.gtk4" path="/com/gutenair/gtk4/">
+    <key name="window-width" type="i">
+      <default>800</default>
+      <summary>Window width</summary>
+    </key>
+    <key name="window-height" type="i">
+      <default>600</default>
+      <summary>Window height</summary>
+    </key>
+    <key name="window-maximized" type="b">
+      <default>false</default>
+      <summary>Is window maximized</summary>
+    </key>
+    <key name="history" type="as">
+      <default>[]</default>
+      <summary>Recently opened project paths</summary>
+    </key>
+    <key name="sidebar-width" type="i">
+      <default>260</default>
+      <summary>Sidebar panel width in pixels</summary>
+    </key>
+    <key name="sidebar-groups" type="as">
+      <default>['Text','Styles','Images','Fonts','Audio','Video','Misc']</default>
+      <summary>Ordered list of all sidebar resource groups</summary>
+    </key>
+    <key name="hidden-sidebar-groups" type="as">
+      <default>[]</default>
+      <summary>List of explicitly hidden sidebar resource groups</summary>
+    </key>
+    <key name="editor-wrap-text" type="b">
+      <default>false</default>
+      <summary>Wrap long lines automatically</summary>
+    </key>
+    <key name="ollama-url" type="s">
+      <default>'http://localhost:11434'</default>
+      <summary>Ollama server URL</summary>
+    </key>
+    <key name="ollama-model" type="s">
+      <default>''</default>
+      <summary>Selected Ollama model</summary>
+    </key>
+  </schema>
+</schemalist>
