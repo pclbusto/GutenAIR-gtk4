@@ -1,7 +1,8 @@
 use adw::prelude::*;
 use adw::{
-    ActionRow, Application, ApplicationWindow, ComboRow, ExpanderRow, HeaderBar,
-    PreferencesDialog, PreferencesGroup, PreferencesPage, ViewStack, ViewSwitcher, WindowTitle,
+    ActionRow, Application, ApplicationWindow, ComboRow, EntryRow, ExpanderRow, HeaderBar,
+    PreferencesDialog, PreferencesGroup, PreferencesPage, ShortcutsDialog, ShortcutsItem,
+    ShortcutsSection, SpinRow, ViewStack, ViewSwitcher, WindowTitle,
     Window as AdwWindow, AboutWindow,
 };
 use gtk::{
@@ -21,6 +22,24 @@ use std::rc::Rc;
 
 const APP_ID: &str = "com.gutenair.gtk4";
 
+fn tr(key: &str) -> &'static str {
+    match key {
+        "nav.title" => "Tabla de contenidos",
+        "nav.header.title" => "Entrada / título",
+        "nav.header.level" => "Nivel",
+        "nav.header.include" => "Incluir",
+        "nav.rename" => "Renombrar",
+        "nav.show_only" => "Mostrar solo incluidos",
+        "nav.select_headings" => "Seleccionar headings para incluir",
+        "nav.mark_all" => "Marcar todos",
+        "nav.clear_all" => "Desmarcar todos",
+        "common.accept" => "Aceptar",
+        "common.cancel" => "Cancelar",
+        "common.untitled" => "Sin título",
+        _ => "",
+    }
+}
+
 // Returns the canonical content folder names defined by the core (strips "OEBPS/" prefix).
 fn core_content_folders() -> Vec<&'static str> {
     gutencore::GutenCore::get_base_folders()
@@ -31,6 +50,14 @@ fn core_content_folders() -> Vec<&'static str> {
 
 // (id, row, check_icon)
 type GroupRows = Vec<(String, ActionRow, Image)>;
+
+#[derive(Clone, Copy, PartialEq)]
+enum TriState { All, None, Mixed }
+
+struct ParagraphSplitTarget {
+    paragraph_id: String,
+    text_offset: usize,
+}
 
 struct UiState {
     main_stack: ViewStack,
@@ -203,6 +230,48 @@ fn update_group_visuals(group_rows: &Rc<RefCell<GroupRows>>, state: &Rc<UiState>
     }
 }
 
+/// Reemplaza los `<link rel="stylesheet">` del <head> con los que indica el config.
+/// Solo toca esas líneas; el resto del contenido queda intacto.
+fn sync_stylesheet_links(content: &str, core: &gutencore::GutenCore, chapter_id: &str) -> String {
+    // Eliminar todos los link de stylesheet existentes (con su posible indentación y newline)
+    let link_re = regex::Regex::new(
+        r#"(?m)[ \t]*<link\b[^>]*\brel=["']stylesheet["'][^>]*/>\r?\n?"#
+    ).unwrap();
+    let without = link_re.replace_all(content, "").to_string();
+
+    // Construir los nuevos link tags según el config del capítulo
+    let styles = core.get_chapter_styles(chapter_id);
+    let new_links: Vec<String> = styles.iter()
+        .filter_map(|id| core.manifest.get(id))
+        .filter(|item| item.media_type == "text/css")
+        .map(|item| format!(
+            r#"  <link rel="stylesheet" type="text/css" href="../{}"/>"#,
+            item.href
+        ))
+        .collect();
+
+    if new_links.is_empty() {
+        return without;
+    }
+
+    let block = format!("\n{}", new_links.join("\n"));
+
+    // Insertar justo después de </title>; si no hay title, después de <head>
+    if let Some(pos) = without.find("</title>") {
+        let at = pos + "</title>".len();
+        let mut out = without.clone();
+        out.insert_str(at, &block);
+        out
+    } else if let Some(pos) = without.find("<head>") {
+        let at = pos + "<head>".len();
+        let mut out = without.clone();
+        out.insert_str(at, &block);
+        out
+    } else {
+        without
+    }
+}
+
 fn save_current_item(state: &Rc<UiState>) {
     let item_id_opt = state.open_item_id.borrow().clone();
     let path_opt = state.current_path.borrow().clone();
@@ -216,16 +285,40 @@ fn save_current_item(state: &Rc<UiState>) {
     }
 
     if let (Some(item_id), Some(path_str)) = (item_id_opt, path_opt) {
-        if let Ok(core) = gutencore::GutenCore::open_folder(&path_str) {
-            if let Ok(full_path) = core.get_resource_path(&item_id) {
-                let buffer = state.editor.buffer();
-                let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).to_string();
+        let core = match gutencore::GutenCore::open_folder(&path_str) {
+            Ok(c) => c,
+            Err(e) => { eprintln!("[Guardado] No se pudo abrir el proyecto para guardar '{}': {}", item_id, e); return; }
+        };
+        let full_path = match core.get_resource_path(&item_id) {
+            Ok(p) => p,
+            Err(e) => { eprintln!("[Guardado] No se encontró la ruta de '{}': {}", item_id, e); return; }
+        };
+        let buffer = state.editor.buffer();
+        let raw = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).to_string();
 
-                println!("[Guardado] Guardando cambios en {}...", item_id);
-                if let Err(e) = std::fs::write(&full_path, text) {
-                    eprintln!("[Error] No se pudo guardar {}: {}", item_id, e);
+        // Para capítulos XHTML con auto_inject activo: re-sincronizar los <link> de estilos
+        let is_xhtml = media_type_opt.as_deref().map(|m| m.contains("html")).unwrap_or(false);
+        let text = if is_xhtml && core.config.auto_inject {
+            sync_stylesheet_links(&raw, &core, &item_id)
+        } else {
+            raw
+        };
+
+        println!("[Guardado] Guardando cambios en {}...", item_id);
+        let save_result = if is_xhtml {
+            match std::fs::write(&full_path, &text) {
+                Ok(_) => {
+                    let mut core = core;
+                    core.build_index()
                 }
+                Err(e) => Err(gutencore::GutenError::Io(e)),
             }
+        } else {
+            std::fs::write(&full_path, &text).map_err(gutencore::GutenError::Io)
+        };
+
+        if let Err(e) = save_result {
+            eprintln!("[Error] No se pudo guardar {}: {}", item_id, e);
         }
     }
 }
@@ -233,7 +326,10 @@ fn save_current_item(state: &Rc<UiState>) {
 fn open_item(state: &Rc<UiState>, item_id: &str, media_type: &str) {
     // Save previous item if exists
     save_current_item(state);
+    load_item_without_saving(state, item_id, media_type);
+}
 
+fn load_item_without_saving(state: &Rc<UiState>, item_id: &str, media_type: &str) {
     if let Some(path_str) = state.current_path.borrow().clone() {
         if let Ok(core) = gutencore::GutenCore::open_folder(&path_str) {
                 if let Ok(full_path) = core.get_resource_path(item_id) {
@@ -280,13 +376,17 @@ fn open_item(state: &Rc<UiState>, item_id: &str, media_type: &str) {
                     // Refresh context menu with new styles
                     setup_editor_context_menu(state);
 
-                    if media_type.contains("html") || media_type.contains("xhtml") {
+                    let is_html = media_type.contains("html") || media_type.contains("xhtml");
+                    if is_html {
                         let uri = glib::filename_to_uri(&full_path, None)
                             .unwrap_or_else(|_| format!("file://{}", full_path.to_string_lossy()).into());
                         state.preview_inner.set_visible_child_name("web");
                         state.preview.load_uri(&uri);
                     }
-                    if media_type.contains("html") || media_type.contains("xhtml") || media_type.contains("css") {
+
+                    // Si es HTML, solo cambiamos a editor si no estábamos ya en vista previa.
+                    // Si NO es HTML (ej. CSS, TXT, XML), forzamos la vista de editor.
+                    if !is_html || state.main_stack.visible_child_name().as_deref() != Some("preview") {
                         state.main_stack.set_visible_child_name("editor");
                     }
                 }
@@ -812,7 +912,7 @@ fn show_nav_builder_dialog(parent: &impl IsA<gtk::Window>, state: &Rc<UiState>) 
     let toc_data: Rc<RefCell<Vec<gutencore::DocToc>>> = Rc::new(RefCell::new(merged));
 
     let dialog = adw::Window::builder()
-        .title("Generate Table Of Contents")
+        .title(tr("nav.title"))
         .modal(true)
         .transient_for(parent)
         .default_width(650)
@@ -838,9 +938,9 @@ fn show_nav_builder_dialog(parent: &impl IsA<gtk::Window>, state: &Rc<UiState>) 
     hbox_headers.set_margin_start(4);
     hbox_headers.set_margin_end(4);
     
-    let lbl_hdr_title = Label::builder().label("TOC Entry / Heading Title").xalign(0.0).hexpand(true).build();
-    let lbl_hdr_level = Label::builder().label("Level").width_request(80).xalign(0.0).build();
-    let lbl_hdr_incl = Label::builder().label("Include").width_request(60).build();
+    let lbl_hdr_title = Label::builder().label(tr("nav.header.title")).xalign(0.0).hexpand(true).build();
+    let lbl_hdr_level = Label::builder().label(tr("nav.header.level")).width_request(80).xalign(0.0).build();
+    let lbl_hdr_incl = Label::builder().label(tr("nav.header.include")).width_request(60).build();
     lbl_hdr_title.add_css_class("caption-heading");
     lbl_hdr_level.add_css_class("caption-heading");
     lbl_hdr_incl.add_css_class("caption-heading");
@@ -871,7 +971,7 @@ fn show_nav_builder_dialog(parent: &impl IsA<gtk::Window>, state: &Rc<UiState>) 
 
     // Right side: buttons
     let vbox_right = Box::new(Orientation::Vertical, 12);
-    let btn_rename = Button::builder().label("Rename").build();
+    let btn_rename = Button::builder().label(tr("nav.rename")).build();
     
     let hbox_arrows = Box::new(Orientation::Horizontal, 6);
     hbox_arrows.set_halign(gtk::Align::Center);
@@ -939,7 +1039,7 @@ fn show_nav_builder_dialog(parent: &impl IsA<gtk::Window>, state: &Rc<UiState>) 
                 row_box.set_margin_bottom(2);
                 row_box.set_margin_end(4);
 
-                let title_text = if item.title.is_empty() { "Untitled" } else { &item.title };
+                let title_text = if item.title.is_empty() { tr("common.untitled") } else { &item.title };
                 let lbl_title = Label::builder().label(title_text).xalign(0.0).hexpand(true).ellipsize(gtk::pango::EllipsizeMode::End).build();
                 
                 let lbl_lvl = Label::builder().label(&format!("h{}", item.level)).width_request(80).xalign(0.0).build();
@@ -969,25 +1069,44 @@ fn show_nav_builder_dialog(parent: &impl IsA<gtk::Window>, state: &Rc<UiState>) 
     hbox_bottom.set_margin_top(8);
 
     let vbox_bottom_left = Box::new(Orientation::Vertical, 6);
-    let chk_show_only = gtk::CheckButton::builder().label("Show TOC items only").build();
-    
-    let model = gtk::StringList::new(&[
-        "<Select headings to include in TOC>",
-        "Include all headings",
-        "Include up to level 1",
-        "Include up to level 2",
-        "Include up to level 3",
-        "Include up to level 4",
-        "Clear all",
-    ]);
+    let chk_show_only = gtk::CheckButton::builder().label(tr("nav.show_only")).build();
+
+    #[derive(Clone)]
+    enum NavPreset {
+        Placeholder,
+        MarkAll,
+        MarkLevel(u8),
+        ClearAll,
+    }
+
+    let heading_levels: std::collections::BTreeSet<u8> = toc_data
+        .borrow()
+        .iter()
+        .flat_map(|doc| doc.items.iter().map(|item| item.level))
+        .collect();
+
+    let mut preset_actions = vec![NavPreset::Placeholder, NavPreset::MarkAll];
+    let mut preset_labels = vec![
+        tr("nav.select_headings").to_string(),
+        tr("nav.mark_all").to_string(),
+    ];
+    for level in heading_levels {
+        preset_actions.push(NavPreset::MarkLevel(level));
+        preset_labels.push(format!("Marcar H{}", level));
+    }
+    preset_actions.push(NavPreset::ClearAll);
+    preset_labels.push(tr("nav.clear_all").to_string());
+
+    let preset_label_refs: Vec<&str> = preset_labels.iter().map(|s| s.as_str()).collect();
+    let model = gtk::StringList::new(&preset_label_refs);
     let combo = gtk::DropDown::new(Some(model), gtk::Expression::NONE);
     
     vbox_bottom_left.append(&chk_show_only);
     vbox_bottom_left.append(&combo);
     hbox_bottom.append(&vbox_bottom_left);
     
-    let btn_ok = Button::builder().label("OK").css_classes(["suggested-action"]).width_request(80).build();
-    let btn_cancel = Button::builder().label("Cancel").width_request(80).build();
+    let btn_ok = Button::builder().label(tr("common.accept")).css_classes(["suggested-action"]).width_request(80).build();
+    let btn_cancel = Button::builder().label(tr("common.cancel")).width_request(80).build();
     
     let hbox_ok_cancel = Box::new(Orientation::Horizontal, 8);
     hbox_ok_cancel.set_halign(gtk::Align::End);
@@ -1007,23 +1126,42 @@ fn show_nav_builder_dialog(parent: &impl IsA<gtk::Window>, state: &Rc<UiState>) 
     let toc = toc_data.clone();
     let list_box_c = list_box.clone();
     let row_map_c = row_map.clone();
+    let preset_actions_c = preset_actions.clone();
     combo.connect_selected_notify(move |cb| {
         let sel = cb.selected();
-        if sel == 0 { return; } 
+        let Some(action) = preset_actions_c.get(sel as usize).cloned() else {
+            return;
+        };
+        if matches!(action, NavPreset::Placeholder) { return; }
         
         let mut data = toc.borrow_mut();
-        for doc in data.iter_mut() {
-            doc.include = sel != 6;
-            for item in doc.items.iter_mut() {
-                item.include = match sel {
-                    1 => true,
-                    2 => item.level <= 1,
-                    3 => item.level <= 2,
-                    4 => item.level <= 3,
-                    5 => item.level <= 4,
-                    6 => false,
-                    _ => item.include,
-                };
+        match action {
+            NavPreset::Placeholder => {}
+            NavPreset::MarkAll => {
+                for doc in data.iter_mut() {
+                    doc.include = true;
+                    for item in doc.items.iter_mut() {
+                        item.include = true;
+                    }
+                }
+            }
+            NavPreset::MarkLevel(level) => {
+                for doc in data.iter_mut() {
+                    let mut has_included_heading = false;
+                    for item in doc.items.iter_mut() {
+                        item.include = item.level == level;
+                        has_included_heading |= item.include;
+                    }
+                    doc.include = has_included_heading;
+                }
+            }
+            NavPreset::ClearAll => {
+                for doc in data.iter_mut() {
+                    doc.include = false;
+                    for item in doc.items.iter_mut() {
+                        item.include = false;
+                    }
+                }
             }
         }
         drop(data);
@@ -1066,12 +1204,16 @@ fn show_nav_builder_dialog(parent: &impl IsA<gtk::Window>, state: &Rc<UiState>) 
             Err(e) => { eprintln!("nav gen: {}", e); return; }
         };
         match core.build_nav_from_data(&data) {
-            Ok(_) => {
-                match core.save() {
-                    Ok(_) => eprintln!("nav: generado y guardado"),
-                    Err(e) => eprintln!("nav save: {}", e),
+            Ok(_) => match core.save() {
+                Ok(_) => {
+                    if let Err(e) = core.build_nav_from_data(&data) {
+                        eprintln!("nav gen ERROR después de save: {}", e);
+                    } else {
+                        eprintln!("nav: generado y guardado");
+                    }
                 }
-            }
+                Err(e) => eprintln!("nav save: {}", e),
+            },
             Err(e) => eprintln!("nav gen ERROR: {}", e),
         }
         dialog_ref.destroy();
@@ -1331,6 +1473,40 @@ fn show_context_popover(parent: gtk::Widget, x: f64, y: f64, state: &Rc<UiState>
         }
     }
 
+    // "Gestionar estilos" — visible cuando toda la selección son capítulos XHTML
+    {
+        let all_xhtml = state.current_path.borrow().as_ref()
+            .and_then(|p| gutencore::GutenCore::open_folder(p).ok())
+            .map(|core| {
+                state.selected_items.borrow().iter().all(|(_, id)| {
+                    core.manifest.get(id)
+                        .map(|item| item.media_type.contains("html"))
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false);
+
+        if all_xhtml {
+            let sep_s = gtk::Separator::new(Orientation::Horizontal);
+            vbox.append(&sep_s);
+
+            let styles_btn = Button::builder()
+                .label("Gestionar estilos…")
+                .has_frame(false)
+                .margin_start(4).margin_end(4).margin_top(4).margin_bottom(4)
+                .build();
+
+            let state_c = state.clone();
+            let popover_c = popover.clone();
+            styles_btn.connect_clicked(move |_| {
+                popover_c.popdown();
+                show_style_manager_dialog(&state_c);
+            });
+
+            vbox.append(&styles_btn);
+        }
+    }
+
     // Separador y botón eliminar (siempre visible)
     {
         let sep_del = gtk::Separator::new(Orientation::Horizontal);
@@ -1356,6 +1532,200 @@ fn show_context_popover(parent: gtk::Widget, x: f64, y: f64, state: &Rc<UiState>
 
     popover.set_child(Some(&vbox));
     popover.popup();
+}
+
+fn show_style_manager_dialog(state: &Rc<UiState>) {
+    let path = match state.current_path.borrow().clone() {
+        Some(p) => p,
+        None => return,
+    };
+    let selected_ids: Vec<String> = state.selected_items.borrow()
+        .iter().map(|(_, id)| id.clone()).collect();
+    if selected_ids.is_empty() { return; }
+
+    let core = match gutencore::GutenCore::open_folder(&path) {
+        Ok(c) => c,
+        Err(e) => { eprintln!("style_manager: {}", e); return; }
+    };
+
+    // Collect CSS files from manifest, sorted by filename
+    let mut css_entries: Vec<(String, String)> = core.manifest.values()
+        .filter(|item| item.media_type == "text/css")
+        .map(|item| {
+            let name = std::path::Path::new(&item.href)
+                .file_name().and_then(|n| n.to_str()).unwrap_or(&item.id).to_string();
+            (item.id.clone(), name)
+        })
+        .collect();
+    css_entries.sort_by(|a, b| a.1.cmp(&b.1));
+
+    // Compute initial tri-state for each CSS
+    let initial_states: Vec<TriState> = css_entries.iter().map(|(css_id, _)| {
+        let count_with = selected_ids.iter()
+            .filter(|ch| core.get_chapter_styles(ch).contains(css_id))
+            .count();
+        if count_with == 0 { TriState::None }
+        else if count_with == selected_ids.len() { TriState::All }
+        else { TriState::Mixed }
+    }).collect();
+
+    // Window
+    let win = adw::Window::builder()
+        .title(if selected_ids.len() == 1 {
+            "Gestionar estilos".to_string()
+        } else {
+            format!("Gestionar estilos — {} capítulos", selected_ids.len())
+        })
+        .transient_for(&state.window)
+        .modal(true)
+        .default_width(360)
+        .build();
+
+    let outer = Box::new(Orientation::Vertical, 0);
+
+    let header = HeaderBar::new();
+    outer.append(&header);
+
+    let content = Box::new(Orientation::Vertical, 12);
+    content.set_margin_start(12);
+    content.set_margin_end(12);
+    content.set_margin_top(12);
+    content.set_margin_bottom(12);
+
+    if css_entries.is_empty() {
+        let lbl = Label::builder()
+            .label("No hay archivos CSS en este proyecto.")
+            .wrap(true)
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Center)
+            .vexpand(true)
+            .build();
+        lbl.add_css_class("dim-label");
+        content.append(&lbl);
+        outer.append(&content);
+        win.set_content(Some(&outer));
+        win.present();
+        return;
+    }
+
+    let list = ListBox::new();
+    list.add_css_class("boxed-list");
+    list.set_selection_mode(gtk::SelectionMode::None);
+
+    // Per-CSS mutable state (None=0, All=1, Mixed=2)
+    let tri_states: Vec<Rc<RefCell<TriState>>> = initial_states.iter()
+        .map(|s| Rc::new(RefCell::new(*s)))
+        .collect();
+
+    fn apply_tristate_to_check(check: &gtk::CheckButton, ts: TriState) {
+        match ts {
+            TriState::All  => { check.set_inconsistent(false); check.set_active(true); }
+            TriState::None => { check.set_inconsistent(false); check.set_active(false); }
+            TriState::Mixed => { check.set_active(false); check.set_inconsistent(true); }
+        }
+    }
+
+    for (i, (css_id, css_name)) in css_entries.iter().enumerate() {
+        let row = ActionRow::builder()
+            .title(css_name.as_str())
+            .subtitle(css_id.as_str())
+            .activatable(true)
+            .build();
+
+        let check = gtk::CheckButton::new();
+        apply_tristate_to_check(&check, initial_states[i]);
+        row.add_prefix(&check);
+
+        let ts_ref = tri_states[i].clone();
+        let check_c = check.clone();
+
+        // Intercept toggle: drive state manually
+        check.connect_toggled(move |_| {
+            let next = match *ts_ref.borrow() {
+                TriState::None  => TriState::All,
+                TriState::All   => TriState::None,
+                TriState::Mixed => TriState::All,
+            };
+            *ts_ref.borrow_mut() = next;
+            apply_tristate_to_check(&check_c, next);
+        });
+
+        // Clicking the row also toggles
+        let ts_row = tri_states[i].clone();
+        let check_row = check.clone();
+        row.connect_activated(move |_| {
+            let next = match *ts_row.borrow() {
+                TriState::None  => TriState::All,
+                TriState::All   => TriState::None,
+                TriState::Mixed => TriState::All,
+            };
+            *ts_row.borrow_mut() = next;
+            apply_tristate_to_check(&check_row, next);
+        });
+
+        list.append(&row);
+    }
+
+    let scroll = ScrolledWindow::builder()
+        .child(&list)
+        .vexpand(true)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .max_content_height(400)
+        .propagate_natural_height(true)
+        .build();
+    content.append(&scroll);
+
+    // Apply button
+    let apply_btn = Button::builder()
+        .label("Aplicar")
+        .halign(gtk::Align::End)
+        .build();
+    apply_btn.add_css_class("suggested-action");
+    content.append(&apply_btn);
+
+    outer.append(&content);
+    win.set_content(Some(&outer));
+
+    let state_c = state.clone();
+    let css_entries_c = css_entries.clone();
+    let selected_ids_c = selected_ids.clone();
+    let win_c = win.clone();
+    apply_btn.connect_clicked(move |_| {
+        let path = match state_c.current_path.borrow().clone() {
+            Some(p) => p,
+            None => return,
+        };
+        let mut core = match gutencore::GutenCore::open_folder(&path) {
+            Ok(c) => c,
+            Err(e) => { eprintln!("style_manager apply: {}", e); return; }
+        };
+
+        for (i, (css_id, _)) in css_entries_c.iter().enumerate() {
+            let target = *tri_states[i].borrow();
+            for ch_id in &selected_ids_c {
+                match target {
+                    TriState::All => {
+                        let mut styles = core.get_chapter_styles(ch_id);
+                        if !styles.contains(css_id) {
+                            styles.push(css_id.clone());
+                            core.config.exceptions.insert(ch_id.clone(), styles);
+                        }
+                    }
+                    TriState::None => {
+                        let _ = core.remove_style_from_chapter(ch_id, css_id);
+                    }
+                    TriState::Mixed => {} // sin cambio
+                }
+            }
+        }
+
+        if let Err(e) = core.save() {
+            eprintln!("style_manager save: {}", e);
+        }
+        win_c.close();
+    });
+
+    win.present();
 }
 
 fn show_delete_confirm_dialog(state: &Rc<UiState>, items: Vec<(String, String)>) {
@@ -1667,6 +2037,182 @@ fn show_rename_dialog(state: &Rc<UiState>) {
     dialog.show();
 }
 
+fn build_css_rows(list_box: &ListBox, css_state: &Rc<RefCell<Vec<(String, String, bool)>>>) {
+    while let Some(child) = list_box.first_child() {
+        list_box.remove(&child);
+    }
+    let items = css_state.borrow().clone();
+    let n = items.len();
+    for (i, (_, css_name, checked)) in items.iter().enumerate() {
+        let row = ActionRow::builder()
+            .title(css_name.as_str())
+            .activatable(false)
+            .build();
+
+        let check = gtk::CheckButton::builder()
+            .active(*checked)
+            .valign(gtk::Align::Center)
+            .build();
+        {
+            let css_state_c = css_state.clone();
+            check.connect_toggled(move |btn| {
+                css_state_c.borrow_mut()[i].2 = btn.is_active();
+            });
+        }
+        row.add_prefix(&check);
+
+        if i > 0 {
+            let up_btn = Button::from_icon_name("go-up-symbolic");
+            up_btn.add_css_class("flat");
+            up_btn.set_valign(gtk::Align::Center);
+            let css_state_c = css_state.clone();
+            let list_box_c = list_box.clone();
+            up_btn.connect_clicked(move |_| {
+                css_state_c.borrow_mut().swap(i, i - 1);
+                build_css_rows(&list_box_c, &css_state_c);
+            });
+            row.add_suffix(&up_btn);
+        }
+
+        if i < n - 1 {
+            let down_btn = Button::from_icon_name("go-down-symbolic");
+            down_btn.add_css_class("flat");
+            down_btn.set_valign(gtk::Align::Center);
+            let css_state_c = css_state.clone();
+            let list_box_c = list_box.clone();
+            down_btn.connect_clicked(move |_| {
+                css_state_c.borrow_mut().swap(i, i + 1);
+                build_css_rows(&list_box_c, &css_state_c);
+            });
+            row.add_suffix(&down_btn);
+        }
+
+        list_box.append(&row);
+    }
+}
+
+fn show_default_styles_popover(btn: &Button, state: &Rc<UiState>) {
+    let path = match state.current_path.borrow().clone() {
+        Some(p) => p,
+        None => return,
+    };
+    let core = match gutencore::GutenCore::open_folder(&path) {
+        Ok(c) => c,
+        Err(e) => { eprintln!("default_styles popover: {}", e); return; }
+    };
+
+    // Build list: default_styles items first (in config order), then non-default CSS
+    let mut css_list: Vec<(String, String, bool)> = Vec::new();
+    for css_id in &core.config.default_styles {
+        if let Some(item) = core.manifest.get(css_id) {
+            let name = Path::new(&item.href)
+                .file_name().and_then(|n| n.to_str()).unwrap_or(css_id).to_string();
+            css_list.push((css_id.clone(), name, true));
+        }
+    }
+    for (id, item) in &core.manifest {
+        if item.media_type == "text/css" && !core.config.default_styles.contains(id) {
+            let name = Path::new(&item.href)
+                .file_name().and_then(|n| n.to_str()).unwrap_or(id).to_string();
+            css_list.push((id.clone(), name, false));
+        }
+    }
+    let auto_inject_init = core.config.auto_inject;
+
+    let css_state: Rc<RefCell<Vec<(String, String, bool)>>> = Rc::new(RefCell::new(css_list));
+
+    let popover = Popover::new();
+    popover.set_parent(btn);
+    popover.set_has_arrow(true);
+
+    let outer = Box::new(Orientation::Vertical, 10);
+    outer.set_margin_start(10);
+    outer.set_margin_end(10);
+    outer.set_margin_top(10);
+    outer.set_margin_bottom(10);
+    outer.set_width_request(300);
+
+    let title_lbl = Label::builder()
+        .label("Estilos predeterminados")
+        .halign(gtk::Align::Start)
+        .build();
+    title_lbl.add_css_class("heading");
+    outer.append(&title_lbl);
+
+    let hint_lbl = Label::builder()
+        .label("Aplicados a todos los capítulos sin excepción. El orden determina la cascada CSS.")
+        .halign(gtk::Align::Start)
+        .wrap(true)
+        .build();
+    hint_lbl.add_css_class("caption");
+    hint_lbl.add_css_class("dim-label");
+    outer.append(&hint_lbl);
+
+    let list_box = ListBox::new();
+    list_box.add_css_class("boxed-list");
+    list_box.set_selection_mode(gtk::SelectionMode::None);
+    build_css_rows(&list_box, &css_state);
+
+    let scroll = ScrolledWindow::builder()
+        .child(&list_box)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .propagate_natural_height(true)
+        .max_content_height(280)
+        .build();
+    outer.append(&scroll);
+
+    // Auto-inject toggle
+    let inject_box = Box::new(Orientation::Horizontal, 8);
+    let inject_lbl = Label::builder()
+        .label("Inyección automática")
+        .hexpand(true)
+        .halign(gtk::Align::Start)
+        .build();
+    let inject_sw = Switch::builder()
+        .active(auto_inject_init)
+        .valign(gtk::Align::Center)
+        .build();
+    inject_box.append(&inject_lbl);
+    inject_box.append(&inject_sw);
+    outer.append(&inject_box);
+
+    // Apply button
+    let apply_btn = Button::builder()
+        .label("Aplicar")
+        .halign(gtk::Align::End)
+        .build();
+    apply_btn.add_css_class("suggested-action");
+    outer.append(&apply_btn);
+
+    popover.set_child(Some(&outer));
+
+    let state_c = state.clone();
+    let css_state_c = css_state.clone();
+    let popover_c = popover.clone();
+    apply_btn.connect_clicked(move |_| {
+        let path = match state_c.current_path.borrow().clone() {
+            Some(p) => p,
+            None => return,
+        };
+        let mut core = match gutencore::GutenCore::open_folder(&path) {
+            Ok(c) => c,
+            Err(e) => { eprintln!("default_styles apply: {}", e); return; }
+        };
+        let new_defaults: Vec<String> = css_state_c.borrow().iter()
+            .filter(|(_, _, checked)| *checked)
+            .map(|(id, _, _)| id.clone())
+            .collect();
+        core.config.default_styles = new_defaults;
+        core.config.auto_inject = inject_sw.is_active();
+        if let Err(e) = core.save() {
+            eprintln!("default_styles save: {}", e);
+        }
+        popover_c.popdown();
+    });
+
+    popover.popup();
+}
+
 fn populate_sidebar(state: &Rc<UiState>, core: &gutencore::GutenCore) {
     let sidebar_box = &state.sidebar_box;
     let settings = &state.settings;
@@ -1736,6 +2282,50 @@ fn populate_sidebar(state: &Rc<UiState>, core: &gutencore::GutenCore) {
             .title(folder_display_name(folder))
             .expanded(true)
             .build();
+
+        let search_btn = Button::from_icon_name("system-search-symbolic");
+        search_btn.add_css_class("flat");
+        search_btn.add_css_class("circular");
+        search_btn.set_valign(gtk::Align::Center);
+        expander.add_suffix(&search_btn);
+
+        let add_btn = Button::from_icon_name("list-add-symbolic");
+        add_btn.add_css_class("flat");
+        add_btn.add_css_class("circular");
+        add_btn.set_valign(gtk::Align::Center);
+        expander.add_suffix(&add_btn);
+
+        let del_section_btn = Button::from_icon_name("list-remove-symbolic");
+        del_section_btn.add_css_class("flat");
+        del_section_btn.add_css_class("circular");
+        del_section_btn.set_valign(gtk::Align::Center);
+        expander.add_suffix(&del_section_btn);
+
+        let styles_config_btn: Option<Button> = if folder.eq_ignore_ascii_case("styles") {
+            let btn = Button::from_icon_name("emblem-system-symbolic");
+            btn.add_css_class("flat");
+            btn.add_css_class("circular");
+            btn.set_valign(gtk::Align::Center);
+            expander.add_suffix(&btn);
+            Some(btn)
+        } else {
+            None
+        };
+
+        let search_entry = SearchEntry::new();
+        search_entry.set_hexpand(true);
+        search_entry.set_margin_start(6);
+        search_entry.set_margin_end(6);
+        search_entry.set_margin_top(4);
+        search_entry.set_margin_bottom(4);
+
+        let search_revealer = gtk::Revealer::builder()
+            .child(&search_entry)
+            .reveal_child(false)
+            .transition_type(gtk::RevealerTransitionType::SlideDown)
+            .build();
+
+        expander.add_row(&search_revealer);
 
         let group_rows: Rc<RefCell<GroupRows>> = Rc::new(RefCell::new(Vec::new()));
 
@@ -1925,6 +2515,137 @@ fn populate_sidebar(state: &Rc<UiState>, core: &gutencore::GutenCore) {
 
             expander.add_row(&action_row);
             group_rows.borrow_mut().push((item.id.clone(), action_row, check_icon));
+        }
+
+        // Toggle search entry on button click
+        {
+            let rev = search_revealer.clone();
+            let entry = search_entry.clone();
+            let rows = group_rows.clone();
+            search_btn.connect_clicked(move |_| {
+                let reveal = !rev.reveals_child();
+                rev.set_reveal_child(reveal);
+                if reveal {
+                    entry.grab_focus();
+                } else {
+                    entry.set_text("");
+                    for (_, row, _) in rows.borrow().iter() {
+                        row.set_visible(true);
+                    }
+                }
+            });
+        }
+
+        // Filter rows as user types
+        {
+            let rows = group_rows.clone();
+            search_entry.connect_search_changed(move |entry| {
+                let query = entry.text().to_lowercase();
+                for (_, row, _) in rows.borrow().iter() {
+                    let title = row.title().to_lowercase();
+                    row.set_visible(query.is_empty() || title.contains(&query));
+                }
+            });
+        }
+
+        // Escape closes search and restores all rows
+        {
+            let rows = group_rows.clone();
+            let rev = search_revealer.clone();
+            search_entry.connect_stop_search(move |entry| {
+                entry.set_text("");
+                rev.set_reveal_child(false);
+                for (_, row, _) in rows.borrow().iter() {
+                    row.set_visible(true);
+                }
+            });
+        }
+
+        // (+) button: popover with "Nuevo" and "Importar…"
+        {
+            let folder_c = folder.clone();
+            let state_c = state.clone();
+            add_btn.connect_clicked(move |btn| {
+                let popover = Popover::new();
+                popover.set_parent(btn);
+                popover.set_has_arrow(true);
+
+                let vbox = Box::new(Orientation::Vertical, 0);
+                vbox.set_margin_start(4);
+                vbox.set_margin_end(4);
+                vbox.set_margin_top(4);
+                vbox.set_margin_bottom(4);
+
+                let (new_mime, new_label) = match folder_c.to_lowercase().as_str() {
+                    "text"   => (Some("application/xhtml+xml"), "Nuevo capítulo"),
+                    "styles" => (Some("text/css"),               "Nueva hoja de estilo"),
+                    _        => (None, ""),
+                };
+
+                if let Some(mime) = new_mime {
+                    let nuevo_btn = Button::builder()
+                        .label(new_label)
+                        .has_frame(false)
+                        .halign(gtk::Align::Fill)
+                        .build();
+                    let state_cc = state_c.clone();
+                    let folder_cc = folder_c.clone();
+                    let mime_s = mime.to_string();
+                    let popover_c = popover.clone();
+                    nuevo_btn.connect_clicked(move |_| {
+                        popover_c.popdown();
+                        if folder_cc.eq_ignore_ascii_case("text") {
+                            show_add_chapters_dialog(&state_cc.window, &state_cc);
+                        } else {
+                            let label = folder_display_name(&folder_cc);
+                            show_add_resource_dialog(&state_cc.window, &state_cc, label, &folder_cc, &mime_s);
+                        }
+                    });
+                    vbox.append(&nuevo_btn);
+                    vbox.append(&gtk::Separator::new(Orientation::Horizontal));
+                }
+
+                let import_btn = Button::builder()
+                    .label("Importar…")
+                    .has_frame(false)
+                    .halign(gtk::Align::Fill)
+                    .build();
+                let state_cc = state_c.clone();
+                let folder_cc = folder_c.clone();
+                let popover_c = popover.clone();
+                import_btn.connect_clicked(move |_| {
+                    popover_c.popdown();
+                    if folder_cc.eq_ignore_ascii_case("text") {
+                        show_import_chapters_dialog(&state_cc.window, &state_cc);
+                    } else {
+                        let label = folder_display_name(&folder_cc);
+                        show_import_dialog(&state_cc.window, &state_cc, label, &folder_cc, "");
+                    }
+                });
+                vbox.append(&import_btn);
+
+                popover.set_child(Some(&vbox));
+                popover.popup();
+            });
+        }
+
+        // (-) button: delete current selection
+        {
+            let state_c = state.clone();
+            del_section_btn.connect_clicked(move |_| {
+                let selected = state_c.selected_items.borrow().clone();
+                if !selected.is_empty() {
+                    show_delete_confirm_dialog(&state_c, selected);
+                }
+            });
+        }
+
+        // (⚙) button: manage default_styles config (Styles section only)
+        if let Some(cfg_btn) = styles_config_btn {
+            let state_c = state.clone();
+            cfg_btn.connect_clicked(move |btn| {
+                show_default_styles_popover(btn, &state_c);
+            });
         }
 
         list.append(&expander);
@@ -2375,6 +3096,7 @@ fn show_import_chapters_dialog(parent: &impl IsA<gtk::Window>, state: &Rc<UiStat
                 Err(e) => eprintln!("import chapters: {}", e),
                 Ok(mut core) => {
                     let mut imported = 0;
+                    let mut errors: Vec<(String, String)> = Vec::new();
                     for i in 0..count {
                         let file = match files.item(i).and_then(|o| o.downcast::<gio::File>().ok()) {
                             Some(f) => f,
@@ -2394,14 +3116,17 @@ fn show_import_chapters_dialog(parent: &impl IsA<gtk::Window>, state: &Rc<UiStat
                             .to_string();
                         let content = match std::fs::read_to_string(&file_path) {
                             Ok(c) => c,
-                            Err(e) => { eprintln!("import: leyendo {}: {}", stem, e); continue; }
+                            Err(e) => {
+                                errors.push((stem.clone(), e.to_string()));
+                                continue;
+                            }
                         };
 
                         let xhtml = match ext.as_str() {
                             "xhtml" | "html" => content,
                             "txt" => core.text_to_xhtml(&content, &stem),
                             "md"  => {
-                                eprintln!("import: .md aún no implementado, saltando {}", stem);
+                                errors.push((stem.clone(), "formato .md aún no implementado".to_string()));
                                 continue;
                             }
                             _ => continue,
@@ -2428,16 +3153,18 @@ fn show_import_chapters_dialog(parent: &impl IsA<gtk::Window>, state: &Rc<UiStat
                                 core.spine_insert(id.clone(), None);
                                 imported += 1;
                             }
-                            Err(e) => eprintln!("import: add_document '{}': {}", id, e),
+                            Err(e) => errors.push((stem.clone(), e.to_string())),
                         }
                     }
 
                     if imported > 0 {
                         match core.save() {
                             Ok(_) => refresh_sidebar(&state),
-                            Err(e) => eprintln!("import: save() falló: {}", e),
+                            Err(e) => errors.push(("Guardar".to_string(), e.to_string())),
                         }
                     }
+
+                    show_import_summary(&state.window, imported, errors);
                 }
             }
         }
@@ -2445,6 +3172,80 @@ fn show_import_chapters_dialog(parent: &impl IsA<gtk::Window>, state: &Rc<UiStat
     });
 
     native.show();
+}
+
+fn show_import_summary(parent: &adw::ApplicationWindow, imported: usize, errors: Vec<(String, String)>) {
+    let dialog = adw::AlertDialog::builder()
+        .heading(if errors.is_empty() {
+            "Importación completada".to_string()
+        } else if imported == 0 {
+            "Importación fallida".to_string()
+        } else {
+            "Importación con advertencias".to_string()
+        })
+        .build();
+
+    dialog.add_response("ok", "Aceptar");
+    dialog.set_default_response(Some("ok"));
+
+    let vbox = Box::new(Orientation::Vertical, 8);
+
+    if imported > 0 {
+        let ok_label = Label::builder()
+            .label(format!("{} capítulo{} importado{} correctamente.",
+                imported,
+                if imported == 1 { "" } else { "s" },
+                if imported == 1 { "" } else { "s" }))
+            .halign(gtk::Align::Start)
+            .wrap(true)
+            .build();
+        ok_label.add_css_class("success");
+        vbox.append(&ok_label);
+    }
+
+    if !errors.is_empty() {
+        let err_label = Label::builder()
+            .label(format!("{} error{}:", errors.len(), if errors.len() == 1 { "" } else { "s" }))
+            .halign(gtk::Align::Start)
+            .build();
+        err_label.add_css_class("heading");
+        vbox.append(&err_label);
+
+        let scroll = ScrolledWindow::builder()
+            .min_content_height(120)
+            .max_content_height(240)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .build();
+
+        let err_box = Box::new(Orientation::Vertical, 4);
+        for (name, msg) in &errors {
+            let row_box = Box::new(Orientation::Vertical, 2);
+
+            let name_lbl = Label::builder()
+                .label(name)
+                .halign(gtk::Align::Start)
+                .wrap(true)
+                .build();
+            name_lbl.add_css_class("caption-heading");
+
+            let msg_lbl = Label::builder()
+                .label(msg)
+                .halign(gtk::Align::Start)
+                .wrap(true)
+                .build();
+            msg_lbl.add_css_class("caption");
+            msg_lbl.add_css_class("dim-label");
+
+            row_box.append(&name_lbl);
+            row_box.append(&msg_lbl);
+            err_box.append(&row_box);
+        }
+        scroll.set_child(Some(&err_box));
+        vbox.append(&scroll);
+    }
+
+    dialog.set_extra_child(Some(&vbox));
+    dialog.present(Some(parent));
 }
 
 fn show_new_project_dialog(parent: &impl IsA<gtk::Window>, state: &Rc<UiState>) {
@@ -2532,6 +3333,365 @@ fn show_new_project_dialog(parent: &impl IsA<gtk::Window>, state: &Rc<UiState>) 
                     load_book(&folder, &state);
                 }
                 Err(e) => eprintln!("Error creando proyecto: {}", e),
+            }
+        }
+        d.destroy();
+    });
+
+    dialog.show();
+}
+
+fn show_split_chapter_dialog(
+    parent: &impl IsA<gtk::Window>,
+    state: &Rc<UiState>,
+    source_id: &str,
+    suggested_split_id: &str,
+) {
+    let path_opt = state.current_path.borrow().clone();
+    let Some(path) = path_opt else { return };
+
+    let dialog = gtk::Dialog::builder()
+        .title("Dividir Capítulo")
+        .transient_for(parent)
+        .modal(true)
+        .default_width(400)
+        .build();
+
+    let content = dialog.content_area();
+    content.set_margin_top(12);
+    content.set_margin_bottom(12);
+    content.set_margin_start(12);
+    content.set_margin_end(12);
+    content.set_spacing(12);
+
+    let list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .css_classes(vec!["boxed-list".to_string()])
+        .build();
+
+    let new_id_row = EntryRow::builder()
+        .title("ID del nuevo capítulo")
+        .text(&format!("{}_b", source_id))
+        .build();
+
+    let split_id_row = EntryRow::builder()
+        .title("ID del punto de corte")
+        .text(suggested_split_id)
+        .build();
+
+    let title_row = EntryRow::builder()
+        .title("Título del nuevo capítulo (opcional)")
+        .build();
+
+    list.append(&new_id_row);
+    list.append(&split_id_row);
+    list.append(&title_row);
+
+    content.append(&list);
+
+    dialog.add_button("Cancelar", ResponseType::Cancel);
+    dialog.add_button("Dividir", ResponseType::Accept);
+
+    let state = state.clone();
+    let source_id = source_id.to_string();
+    dialog.connect_response(move |d, res| {
+        if res == ResponseType::Accept {
+            let new_id = new_id_row.text().to_string();
+            let split_id = split_id_row.text().to_string();
+            let new_title = title_row.text().to_string();
+            let new_title_opt = if new_title.is_empty() { None } else { Some(new_title) };
+
+            if !new_id.is_empty() && !split_id.is_empty() {
+                if let Ok(mut core) = gutencore::GutenCore::open_folder(&path) {
+                    let options = gutencore::SplitChapterOptions {
+                        source_id: source_id.clone(),
+                        new_id: new_id.clone(),
+                        split_at: gutencore::SplitPoint::ElementId(split_id),
+                        new_title: new_title_opt,
+                    };
+
+                    match core.split_chapter(options) {
+                        Ok(_) => {
+                            let _ = core.save();
+                            refresh_sidebar(&state);
+                            load_item_without_saving(
+                                &state,
+                                &source_id,
+                                "application/xhtml+xml",
+                            );
+                        }
+                        Err(e) => eprintln!("Error dividiendo capítulo: {}", e),
+                    }
+                }
+            }
+        }
+        d.destroy();
+    });
+
+    dialog.show();
+}
+
+fn show_error_dialog(parent: &impl IsA<gtk::Window>, title: &str, message: &str) {
+    let dialog = gtk::Dialog::builder()
+        .title(title)
+        .transient_for(parent)
+        .modal(true)
+        .default_width(420)
+        .build();
+
+    let label = Label::builder()
+        .label(message)
+        .wrap(true)
+        .xalign(0.0)
+        .margin_top(16)
+        .margin_bottom(16)
+        .margin_start(16)
+        .margin_end(16)
+        .build();
+
+    dialog.content_area().append(&label);
+    dialog.add_button("Aceptar", ResponseType::Accept);
+    dialog.connect_response(|d, _| d.destroy());
+    dialog.show();
+}
+
+fn char_offset_to_byte(text: &str, char_offset: usize) -> usize {
+    text.char_indices()
+        .nth(char_offset)
+        .map(|(idx, _)| idx)
+        .unwrap_or(text.len())
+}
+
+fn extract_id_attr(tag: &str) -> Option<String> {
+    let re = regex::Regex::new(r#"(?is)\bid\s*=\s*(?:"([^"]+)"|'([^']+)')"#).ok()?;
+    let caps = re.captures(tag)?;
+    caps.get(1)
+        .or_else(|| caps.get(2))
+        .map(|m| m.as_str().to_string())
+}
+
+fn text_offset_in_xhtml_fragment(fragment: &str, limit: usize) -> Option<usize> {
+    let mut idx = 0;
+    let mut count = 0;
+
+    while idx < limit {
+        let rest = &fragment[idx..];
+        let ch = rest.chars().next()?;
+
+        if ch == '<' {
+            let end = rest.find('>')?;
+            let next = idx + end + 1;
+            if next > limit {
+                return None;
+            }
+            idx = next;
+        } else if ch == '&' {
+            if let Some(end) = rest.find(';') {
+                let next = idx + end + 1;
+                if next <= limit {
+                    count += 1;
+                    idx = next;
+                    continue;
+                }
+            }
+            count += 1;
+            idx += ch.len_utf8();
+        } else {
+            count += 1;
+            idx += ch.len_utf8();
+        }
+    }
+
+    Some(count)
+}
+
+fn find_paragraph_split_target(text: &str, cursor_char_offset: usize) -> Result<ParagraphSplitTarget, String> {
+    let cursor_byte = char_offset_to_byte(text, cursor_char_offset);
+    let p_re = regex::Regex::new(r#"(?is)<p\b[^>]*>"#)
+        .map_err(|e| e.to_string())?;
+    let close_p_re = regex::Regex::new(r#"(?is)</p\s*>"#)
+        .map_err(|e| e.to_string())?;
+
+    for start_tag in p_re.find_iter(text) {
+        if start_tag.end() > cursor_byte {
+            break;
+        }
+
+        let after_open = &text[start_tag.end()..];
+        let Some(close_match) = close_p_re.find(after_open) else {
+            continue;
+        };
+        let close_byte = start_tag.end() + close_match.start();
+
+        if cursor_byte > close_byte {
+            continue;
+        }
+
+        let tag = &text[start_tag.start()..start_tag.end()];
+        let paragraph_id = extract_id_attr(tag)
+            .ok_or_else(|| "El párrafo bajo el cursor no tiene atributo id.".to_string())?;
+        let inner = &text[start_tag.end()..close_byte];
+        let relative_cursor = cursor_byte.saturating_sub(start_tag.end());
+        let text_offset = text_offset_in_xhtml_fragment(inner, relative_cursor)
+            .ok_or_else(|| "El cursor está dentro de una etiqueta XHTML; ponelo en texto del párrafo.".to_string())?;
+
+        return Ok(ParagraphSplitTarget {
+            paragraph_id,
+            text_offset,
+        });
+    }
+
+    Err("No encontré un <p id=\"...\"> que contenga el cursor.".to_string())
+}
+
+fn split_paragraph_at_cursor(state: &Rc<UiState>) {
+    let media_type = state.open_item_media_type.borrow().clone().unwrap_or_default();
+    if !media_type.contains("html") && !media_type.contains("xhtml") {
+        show_error_dialog(&state.window, "Dividir párrafo", "Esta acción solo funciona en capítulos XHTML.");
+        return;
+    }
+
+    let Some(chapter_id) = state.open_item_id.borrow().clone() else {
+        show_error_dialog(&state.window, "Dividir párrafo", "No hay un capítulo abierto.");
+        return;
+    };
+    let Some(path) = state.current_path.borrow().clone() else {
+        show_error_dialog(&state.window, "Dividir párrafo", "No hay un proyecto abierto.");
+        return;
+    };
+
+    let buffer = state.editor.buffer();
+    let cursor = buffer.iter_at_mark(&buffer.get_insert());
+    let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).to_string();
+    let target = match find_paragraph_split_target(&text, cursor.offset() as usize) {
+        Ok(target) => target,
+        Err(e) => {
+            show_error_dialog(&state.window, "Dividir párrafo", &e);
+            return;
+        }
+    };
+
+    save_current_item(state);
+
+    let mut core = match gutencore::GutenCore::open_folder(&path) {
+        Ok(core) => core,
+        Err(e) => {
+            show_error_dialog(&state.window, "Dividir párrafo", &format!("No se pudo abrir el proyecto: {}", e));
+            return;
+        }
+    };
+
+    let options = gutencore::SplitParagraphOptions {
+        chapter_id: chapter_id.clone(),
+        paragraph_id: target.paragraph_id,
+        text_offset: target.text_offset,
+        new_paragraph_id: None,
+    };
+
+    if let Err(e) = core.split_paragraph(options) {
+        show_error_dialog(&state.window, "Dividir párrafo", &format!("{}", e));
+        return;
+    }
+
+    let full_path = match core.get_resource_path(&chapter_id) {
+        Ok(path) => path,
+        Err(e) => {
+            show_error_dialog(&state.window, "Dividir párrafo", &format!("No se pudo recargar el capítulo: {}", e));
+            return;
+        }
+    };
+
+    match std::fs::read_to_string(&full_path) {
+        Ok(content) => state.editor.buffer().set_text(&content),
+        Err(e) => {
+            show_error_dialog(&state.window, "Dividir párrafo", &format!("No se pudo recargar el capítulo: {}", e));
+            return;
+        }
+    }
+
+    let uri = glib::filename_to_uri(&full_path, None)
+        .unwrap_or_else(|_| format!("file://{}", full_path.to_string_lossy()).into());
+    state.preview.load_uri(&uri);
+}
+
+fn show_add_chapters_dialog(
+    parent: &impl IsA<gtk::Window>,
+    state: &Rc<UiState>,
+) {
+    let path_opt = state.current_path.borrow().clone();
+    let Some(path) = path_opt else { return };
+
+    let dialog = gtk::Dialog::builder()
+        .title("Agregar Capítulos")
+        .transient_for(parent)
+        .modal(true)
+        .default_width(400)
+        .build();
+
+    let content = dialog.content_area();
+    content.set_margin_top(12);
+    content.set_margin_bottom(12);
+    content.set_margin_start(12);
+    content.set_margin_end(12);
+    content.set_spacing(12);
+
+    let list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .css_classes(vec!["boxed-list".to_string()])
+        .build();
+
+    let prefix_row = EntryRow::builder()
+        .title("Prefijo")
+        .text("capitulo_")
+        .build();
+
+    let quantity_row = SpinRow::builder()
+        .title("Cantidad de capítulos")
+        .adjustment(&gtk::Adjustment::new(1.0, 1.0, 1000.0, 1.0, 10.0, 0.0))
+        .build();
+
+    let start_row = SpinRow::builder()
+        .title("Número inicial")
+        .adjustment(&gtk::Adjustment::new(1.0, 0.0, 10000.0, 1.0, 10.0, 0.0))
+        .build();
+
+    let digits_row = SpinRow::builder()
+        .title("Dígitos de numeración")
+        .adjustment(&gtk::Adjustment::new(2.0, 1.0, 10.0, 1.0, 1.0, 0.0))
+        .build();
+
+    list.append(&prefix_row);
+    list.append(&quantity_row);
+    list.append(&start_row);
+    list.append(&digits_row);
+
+    content.append(&list);
+
+    dialog.add_button("Cancelar", ResponseType::Cancel);
+    dialog.add_button("Agregar", ResponseType::Accept);
+
+    let state = state.clone();
+    dialog.connect_response(move |d, res| {
+        if res == ResponseType::Accept {
+            let prefix = prefix_row.text().to_string();
+            let quantity = quantity_row.value() as i32;
+            let start = start_row.value() as i32;
+            let digits = digits_row.value() as usize;
+
+            if !prefix.is_empty() && quantity > 0 {
+                if let Ok(mut core) = gutencore::GutenCore::open_folder(&path) {
+                    for i in 0..quantity {
+                        let n = start + i;
+                        let id = format!("{}{:0width$}", prefix, n, width = digits);
+                        let _ = core.add_document(&id, &format!("<h1>Capítulo {}</h1>", n))
+                            .and_then(|_| {
+                                core.spine_insert(id.clone(), None);
+                                Ok(())
+                            });
+                    }
+                    let _ = core.save();
+                    refresh_sidebar(&state);
+                }
             }
         }
         d.destroy();
@@ -2925,6 +4085,178 @@ fn show_ai_dialog(parent: &ApplicationWindow, state: &Rc<UiState>, selected_text
     dialog.present();
 }
 
+fn selected_editor_text(state: &Rc<UiState>) -> Option<String> {
+    let buffer = state.editor.buffer();
+    buffer
+        .selection_bounds()
+        .map(|(start, end)| buffer.text(&start, &end, false).to_string())
+}
+
+fn replace_editor_selection(state: &Rc<UiState>, replacement: &str) {
+    let buffer = state.editor.buffer();
+    if buffer.has_selection() {
+        buffer.delete_selection(true, true);
+        buffer.insert_at_cursor(replacement);
+    }
+}
+
+fn show_ai_for_selection(state: &Rc<UiState>) {
+    let text = selected_editor_text(state).unwrap_or_default();
+    show_ai_dialog(&state.window, state, &text);
+}
+
+fn split_chapter_at_cursor(state: &Rc<UiState>) {
+    let buffer = state.editor.buffer();
+    let cursor = buffer.iter_at_mark(&buffer.get_insert());
+
+    // Buscar el id="..." más cercano hacia atrás desde el cursor.
+    let text = buffer.text(&buffer.start_iter(), &cursor, false).to_string();
+    let re = regex::Regex::new(r#"id="([^"]+)""#).unwrap();
+    let found_id = re.captures_iter(&text)
+        .last()
+        .map(|cap| cap[1].to_string())
+        .unwrap_or_default();
+
+    if let Some(item_id) = state.open_item_id.borrow().clone() {
+        show_split_chapter_dialog(&state.window, state, &item_id, &found_id);
+    }
+}
+
+fn strip_tags_from_selection(state: &Rc<UiState>) {
+    if let Some(selected) = selected_editor_text(state) {
+        let plain = gutencore::GutenCore::extract_text(&selected);
+        replace_editor_selection(state, &plain);
+    }
+}
+
+fn create_list_from_selection(state: &Rc<UiState>, kind: gutencore::ListKind) {
+    if let Some(selected) = selected_editor_text(state) {
+        let formatted = gutencore::GutenCore::create_list(gutencore::CreateListOptions {
+            input: selected,
+            kind,
+            mode: gutencore::CreateListInputMode::Auto,
+            class_name: None,
+        });
+
+        match formatted {
+            Ok(list_html) => replace_editor_selection(state, &list_html),
+            Err(e) => show_error_dialog(&state.window, "Crear lista", &e.to_string()),
+        }
+    }
+}
+
+fn apply_tag_to_selection(state: &Rc<UiState>, tag_name: String) {
+    if let Some(text) = selected_editor_text(state) {
+        let formatted = gutencore::GutenCore::apply_format(gutencore::ApplyFormatOptions {
+            input: text,
+            mode: gutencore::FormatInputMode::HtmlFragment,
+            format: gutencore::TextFormat::Tag { tag: tag_name },
+        });
+
+        match formatted {
+            Ok(tagged) => replace_editor_selection(state, &tagged),
+            Err(e) => show_error_dialog(&state.window, "Aplicar formato", &e.to_string()),
+        }
+    }
+}
+
+fn apply_tag_class_to_selection(state: &Rc<UiState>, raw: String) {
+    let (tag, class) = raw.split_once('|')
+        .map(|(t, c)| (t.to_string(), c.to_string()))
+        .unwrap_or_else(|| ("span".to_string(), raw.clone()));
+
+    if let Some(text) = selected_editor_text(state) {
+        let formatted = gutencore::GutenCore::apply_format(gutencore::ApplyFormatOptions {
+            input: text,
+            mode: gutencore::FormatInputMode::HtmlFragment,
+            format: gutencore::TextFormat::Class {
+                tag: Some(tag),
+                class_name: class,
+            },
+        });
+
+        match formatted {
+            Ok(tagged) => replace_editor_selection(state, &tagged),
+            Err(e) => show_error_dialog(&state.window, "Aplicar formato", &e.to_string()),
+        }
+    }
+}
+
+fn toggle_sidebar(sidebar: &ScrolledWindow, paned: &Paned, settings: &gio::Settings) {
+    if sidebar.is_visible() {
+        let _ = settings.set_int("sidebar-width", paned.position());
+        sidebar.set_visible(false);
+    } else {
+        sidebar.set_visible(true);
+        let saved = settings.int("sidebar-width");
+        paned.set_position(if saved > 10 { saved } else { 260 });
+    }
+}
+
+fn toggle_editor_preview(state: &Rc<UiState>) {
+    match state.main_stack.visible_child_name().as_deref() {
+        Some("preview") => state.main_stack.set_visible_child_name("editor"),
+        _ => state.main_stack.set_visible_child_name("preview"),
+    }
+}
+
+fn shortcuts_section(title: &str, items: &[(&str, &str)]) -> ShortcutsSection {
+    let section = ShortcutsSection::new(Some(title));
+    for (label, accel) in items {
+        section.add(ShortcutsItem::new(label, accel));
+    }
+    section
+}
+
+fn show_shortcuts_dialog(parent: &ApplicationWindow) {
+    let dialog = ShortcutsDialog::new();
+
+    dialog.add(shortcuts_section("Proyecto", &[
+        ("Abrir proyecto/libro", "<Control>o"),
+        ("Guardar archivo actual", "<Control>s"),
+        ("Nuevo capítulo", "<Control>n"),
+        ("Importar capítulos", "<Control>t"),
+        ("Exportar", "<Control><Shift>t"),
+        ("Tabla de contenidos", "<Control><Shift>n"),
+        ("Proyecto reciente 1", "<Control>1"),
+        ("Proyecto reciente 2", "<Control>2"),
+        ("Proyecto reciente 3", "<Control>3"),
+        ("Proyecto reciente 4", "<Control>4"),
+        ("Proyecto reciente 5", "<Control>5"),
+    ]));
+
+    dialog.add(shortcuts_section("Vista", &[
+        ("Alternar editor/vista previa", "<Control>Right"),
+        ("Alternar barra lateral", "<Control><Shift>s"),
+        ("Mostrar atajos de teclado", "F1"),
+    ]));
+
+    dialog.add(shortcuts_section("Edición", &[
+        ("Buscar/reemplazar", "<Control>f"),
+        ("Asistente IA", "<Control><Shift>i"),
+        ("Dividir párrafo", "<Control>d"),
+        ("Dividir capítulo", "<Control><Shift>d"),
+        ("Quitar tags", "<Control>Delete"),
+    ]));
+
+    dialog.add(shortcuts_section("Formatos", &[
+        ("Negrita", "<Control>b"),
+        ("Cursiva", "<Control>k"),
+        ("Título 1", "<Control>h"),
+        ("Párrafo", "<Control>g"),
+        ("Lista con viñetas", "<Control>a"),
+        ("Lista numerada", "<Control><Shift>a"),
+    ]));
+
+    dialog.add(shortcuts_section("Informes y validación", &[
+        ("Informe del capítulo", "<Control>i"),
+        ("Informe del libro", "<Control><Alt>i"),
+        ("Verificar EPUB", "<Control><Shift>v"),
+    ]));
+
+    dialog.present(Some(parent));
+}
+
 fn setup_editor_context_menu(state: &Rc<UiState>) {
     let menu = gio::Menu::new();
     
@@ -2932,19 +4264,26 @@ fn setup_editor_context_menu(state: &Rc<UiState>) {
     let ai_section = gio::Menu::new();
     ai_section.append(Some("Asistente IA..."), Some("editor.ai"));
     menu.append_section(None, &ai_section);
+
+    // Split Section
+    let split_section = gio::Menu::new();
+    split_section.append(Some("Dividir párrafo aquí"), Some("editor.split-paragraph"));
+    split_section.append(Some("Dividir capítulo aquí..."), Some("editor.split-chapter"));
+    menu.append_section(None, &split_section);
     
     // Submenu for Styles
     let styles_submenu = gio::Menu::new();
     menu.append_submenu(Some("Estilos"), &styles_submenu);
 
-    // Initial population (common tags)
-    let common_styles = vec![("Negrita", "b"), ("Cursiva", "i"), ("Título 1", "h1"), ("Título 2", "h2"), ("Párrafo", "p")];
-    for (label, tag) in common_styles {
-        let item = gio::MenuItem::new(Some(label), Some(&format!("editor.apply-tag('{}')", tag)));
-        styles_submenu.append_item(&item);
-    }
+    styles_submenu.append(Some("Quitar tags"), Some("editor.strip-tags"));
+    styles_submenu.append(Some("Lista con viñetas"), Some("editor.create-list('ul')"));
+    styles_submenu.append(Some("Lista numerada"), Some("editor.create-list('ol')"));
+    styles_submenu.append_section(None, &gio::Menu::new());
 
-    // Try to add styles from core if possible (per chapter)
+    let common_styles = vec![("Negrita", "strong"), ("Cursiva", "em"), ("Título 1", "h1"), ("Título 2", "h2"), ("Párrafo", "p")];
+    let mut classes_by_tag: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+    // Try to load styles from core if possible (per chapter)
     let item_id_opt = state.open_item_id.borrow().clone();
     let path_opt = state.current_path.borrow().clone();
 
@@ -2969,8 +4308,6 @@ fn setup_editor_context_menu(state: &Rc<UiState>) {
             // Use get_style_catalog to get the actual CSS class names
             match core.get_style_catalog(&item_id) {
                 Ok(catalogs) => {
-                    // (tag, class) — tag is the wrapping element
-                    let mut entries: Vec<(String, String)> = Vec::new();
                     for catalog in &catalogs {
                         let bloque: Vec<&str> = catalog.estilos.bloque.iter().map(|e| e.clase.as_str()).collect();
                         let linea: Vec<&str> = catalog.estilos.linea.iter().map(|e| e.clase.as_str()).collect();
@@ -2978,24 +4315,21 @@ fn setup_editor_context_menu(state: &Rc<UiState>) {
                             catalog.archivo_origen, bloque, linea);
                         for entry in &catalog.estilos.bloque {
                             let tag = entry.tag_sugerido.clone().unwrap_or_else(|| "p".to_string());
-                            entries.push((tag, entry.clase.clone()));
+                            let classes = classes_by_tag.entry(tag).or_default();
+                            if !classes.contains(&entry.clase) {
+                                classes.push(entry.clase.clone());
+                            }
                         }
                         for entry in &catalog.estilos.linea {
                             let tag = entry.tag_sugerido.clone().unwrap_or_else(|| "span".to_string());
-                            entries.push((tag, entry.clase.clone()));
+                            let classes = classes_by_tag.entry(tag).or_default();
+                            if !classes.contains(&entry.clase) {
+                                classes.push(entry.clase.clone());
+                            }
                         }
                     }
-
-                    if !entries.is_empty() {
-                        styles_submenu.append_section(None, &gio::Menu::new());
-                        for (tag, class) in &entries {
-                            // encode as "tag|class" so the action knows which element to use
-                            let label = format!("{}.{}", tag, class);
-                            let target = format!("{}|{}", tag, class);
-                            let item = gio::MenuItem::new(Some(&label), Some(&format!("editor.apply-tag-class('{}')", target)));
-                            styles_submenu.append_item(&item);
-                        }
-                        println!("[Menu] Entradas construidas en el menú: {:?}", entries);
+                    if !classes_by_tag.is_empty() {
+                        println!("[Menu] Clases agrupadas por tag: {:?}", classes_by_tag);
                     } else {
                         println!("[Menu] No se encontraron clases CSS para este capítulo.");
                     }
@@ -3009,6 +4343,37 @@ fn setup_editor_context_menu(state: &Rc<UiState>) {
         }
     }
 
+    for (label, tag) in &common_styles {
+        if let Some(classes) = classes_by_tag.remove(*tag) {
+            let tag_menu = gio::Menu::new();
+            tag_menu.append(Some(label), Some(&format!("editor.apply-tag('{}')", tag)));
+            tag_menu.append_section(None, &gio::Menu::new());
+            for class in classes {
+                let item_label = format!("{}.{}", tag, class);
+                let target = format!("{}|{}", tag, class);
+                let item = gio::MenuItem::new(Some(&item_label), Some(&format!("editor.apply-tag-class('{}')", target)));
+                tag_menu.append_item(&item);
+            }
+            styles_submenu.append_submenu(Some(label), &tag_menu);
+        } else {
+            let item = gio::MenuItem::new(Some(label), Some(&format!("editor.apply-tag('{}')", tag)));
+            styles_submenu.append_item(&item);
+        }
+    }
+
+    for (tag, classes) in classes_by_tag {
+        let tag_menu = gio::Menu::new();
+        tag_menu.append(Some(&tag), Some(&format!("editor.apply-tag('{}')", tag)));
+        tag_menu.append_section(None, &gio::Menu::new());
+        for class in classes {
+            let item_label = format!("{}.{}", tag, class);
+            let target = format!("{}|{}", tag, class);
+            let item = gio::MenuItem::new(Some(&item_label), Some(&format!("editor.apply-tag-class('{}')", target)));
+            tag_menu.append_item(&item);
+        }
+        styles_submenu.append_submenu(Some(&tag), &tag_menu);
+    }
+
     state.editor.set_extra_menu(Some(&menu));
 
     let action_group = gio::SimpleActionGroup::new();
@@ -3018,28 +4383,64 @@ fn setup_editor_context_menu(state: &Rc<UiState>) {
     let ai_action = gio::SimpleAction::new("ai", None);
     let state_ai = state.clone();
     ai_action.connect_activate(move |_, _| {
-        let buffer = state_ai.editor.buffer();
-        let text = if let Some((start, end)) = buffer.selection_bounds() {
-            buffer.text(&start, &end, false).to_string()
-        } else {
-            "".to_string()
-        };
-        show_ai_dialog(&state_ai.window, &state_ai, &text);
+        show_ai_for_selection(&state_ai);
     });
     action_group.add_action(&ai_action);
+
+    // Split Chapter Action
+    let split_action = gio::SimpleAction::new("split-chapter", None);
+    let state_split = state.clone();
+    split_action.connect_activate(move |_, _| {
+        split_chapter_at_cursor(&state_split);
+    });
+    action_group.add_action(&split_action);
+
+    // Split Paragraph Action
+    let split_paragraph_action = gio::SimpleAction::new("split-paragraph", None);
+    let state_split_paragraph = state.clone();
+    split_paragraph_action.connect_activate(move |_, _| {
+        split_paragraph_at_cursor(&state_split_paragraph);
+    });
+    action_group.add_action(&split_paragraph_action);
+
+    // Strip tags from the current selection.
+    let strip_tags_action = gio::SimpleAction::new("strip-tags", None);
+    let state_strip_tags = state.clone();
+    strip_tags_action.connect_activate(move |_, _| {
+        strip_tags_from_selection(&state_strip_tags);
+    });
+    action_group.add_action(&strip_tags_action);
+
+    // Create an unordered or ordered list from selected lines.
+    let create_list_action = gio::SimpleAction::new("create-list", Some(glib::VariantTy::STRING));
+    let state_create_list = state.clone();
+    create_list_action.connect_activate(move |_, variant| {
+        let Some(kind_raw) = variant.and_then(|v| v.get::<String>()) else {
+            return;
+        };
+        let kind = match kind_raw.as_str() {
+            "ul" => gutencore::ListKind::Unordered,
+            "ol" => gutencore::ListKind::Ordered,
+            _ => {
+                show_error_dialog(
+                    &state_create_list.window,
+                    "Crear lista",
+                    &format!("Tipo de lista desconocido: {}", kind_raw),
+                );
+                return;
+            }
+        };
+
+        create_list_from_selection(&state_create_list, kind);
+    });
+    action_group.add_action(&create_list_action);
 
     // Apply Tag Action (e.g. <b>...</b>)
     let tag_apply_action = gio::SimpleAction::new("apply-tag", Some(glib::VariantTy::STRING));
     let state_tag = state.clone();
     tag_apply_action.connect_activate(move |_, variant| {
         if let Some(tag_name) = variant.and_then(|v| v.get::<String>()) {
-            let buffer = state_tag.editor.buffer();
-            if let Some((start, end)) = buffer.selection_bounds() {
-                let text = buffer.text(&start, &end, false).to_string();
-                let tagged = format!("<{}>{}</{}>", tag_name, text, tag_name);
-                buffer.delete_selection(true, true);
-                buffer.insert_at_cursor(&tagged);
-            }
+            apply_tag_to_selection(&state_tag, tag_name);
         }
     });
     action_group.add_action(&tag_apply_action);
@@ -3049,16 +4450,7 @@ fn setup_editor_context_menu(state: &Rc<UiState>) {
     let state_tc = state.clone();
     tag_class_action.connect_activate(move |_, variant| {
         if let Some(raw) = variant.and_then(|v| v.get::<String>()) {
-            let (tag, class) = raw.split_once('|')
-                .map(|(t, c)| (t.to_string(), c.to_string()))
-                .unwrap_or_else(|| ("span".to_string(), raw.clone()));
-            let buffer = state_tc.editor.buffer();
-            if let Some((start, end)) = buffer.selection_bounds() {
-                let text = buffer.text(&start, &end, false).to_string();
-                let tagged = format!("<{} class=\"{}\">{}</{}>", tag, class, text, tag);
-                buffer.delete_selection(true, true);
-                buffer.insert_at_cursor(&tagged);
-            }
+            apply_tag_class_to_selection(&state_tc, raw);
         }
     });
     action_group.add_action(&tag_class_action);
@@ -3326,6 +4718,7 @@ fn build_ui(app: &Application) {
     menu.append(Some("Exportar…"), Some("app.export"));
     menu.append(Some("Tabla de Contenidos…"), Some("app.nav-builder"));
     menu.append(Some("Verificar EPUB"), Some("app.epub-check"));
+    menu.append(Some("Atajos de teclado"), Some("app.shortcuts"));
     menu.append(Some("Ayuda"), Some("app.help"));
     menu.append(Some("Acerca de GutenAIR"), Some("app.about"));
     let menu_button = MenuButton::builder()
@@ -3383,6 +4776,129 @@ fn build_ui(app: &Application) {
     });
 
     setup_editor_context_menu(&ui_state);
+
+    // --- Global editor/navigation shortcuts ---
+    let open_action = gio::SimpleAction::new("open", None);
+    open_action.connect_activate({
+        let btn = open_menu_btn.clone();
+        move |_, _| btn.popup()
+    });
+    app.add_action(&open_action);
+    app.set_accels_for_action("app.open", &["<Control>o"]);
+
+    let shortcuts_action = gio::SimpleAction::new("shortcuts", None);
+    shortcuts_action.connect_activate({
+        let win = window.clone();
+        move |_, _| show_shortcuts_dialog(&win)
+    });
+    app.add_action(&shortcuts_action);
+    app.set_accels_for_action("app.shortcuts", &["F1"]);
+
+    let toggle_preview_action = gio::SimpleAction::new("toggle-preview", None);
+    toggle_preview_action.connect_activate({
+        let state = ui_state.clone();
+        move |_, _| toggle_editor_preview(&state)
+    });
+    app.add_action(&toggle_preview_action);
+    app.set_accels_for_action("app.toggle-preview", &["<Control>Right"]);
+
+    let toggle_sidebar_action = gio::SimpleAction::new("toggle-sidebar", None);
+    toggle_sidebar_action.connect_activate({
+        let sidebar = sidebar_scrolled.clone();
+        let p = paned.clone();
+        let s = settings.clone();
+        move |_, _| toggle_sidebar(&sidebar, &p, &s)
+    });
+    app.add_action(&toggle_sidebar_action);
+    app.set_accels_for_action("app.toggle-sidebar", &["<Control><Shift>s"]);
+
+    let ai_action = gio::SimpleAction::new("ai", None);
+    ai_action.connect_activate({
+        let state = ui_state.clone();
+        move |_, _| show_ai_for_selection(&state)
+    });
+    app.add_action(&ai_action);
+    app.set_accels_for_action("app.ai", &["<Control><Shift>i"]);
+
+    let split_paragraph_action = gio::SimpleAction::new("split-paragraph", None);
+    split_paragraph_action.connect_activate({
+        let state = ui_state.clone();
+        move |_, _| split_paragraph_at_cursor(&state)
+    });
+    app.add_action(&split_paragraph_action);
+    app.set_accels_for_action("app.split-paragraph", &["<Control>d"]);
+
+    let split_chapter_action = gio::SimpleAction::new("split-chapter", None);
+    split_chapter_action.connect_activate({
+        let state = ui_state.clone();
+        move |_, _| split_chapter_at_cursor(&state)
+    });
+    app.add_action(&split_chapter_action);
+    app.set_accels_for_action("app.split-chapter", &["<Control><Shift>d"]);
+
+    let strip_tags_action = gio::SimpleAction::new("strip-tags", None);
+    strip_tags_action.connect_activate({
+        let state = ui_state.clone();
+        move |_, _| strip_tags_from_selection(&state)
+    });
+    app.add_action(&strip_tags_action);
+    app.set_accels_for_action("app.strip-tags", &["<Control>Delete"]);
+
+    let unordered_list_action = gio::SimpleAction::new("list-unordered", None);
+    unordered_list_action.connect_activate({
+        let state = ui_state.clone();
+        move |_, _| create_list_from_selection(&state, gutencore::ListKind::Unordered)
+    });
+    app.add_action(&unordered_list_action);
+    app.set_accels_for_action("app.list-unordered", &["<Control>a"]);
+
+    let ordered_list_action = gio::SimpleAction::new("list-ordered", None);
+    ordered_list_action.connect_activate({
+        let state = ui_state.clone();
+        move |_, _| create_list_from_selection(&state, gutencore::ListKind::Ordered)
+    });
+    app.add_action(&ordered_list_action);
+    app.set_accels_for_action("app.list-ordered", &["<Control><Shift>a"]);
+
+    for (action_name, tag, accel) in [
+        ("format-strong", "strong", "<Control>b"),
+        ("format-em", "em", "<Control>k"),
+        ("format-h1", "h1", "<Control>h"),
+        ("format-p", "p", "<Control>g"),
+    ] {
+        let action = gio::SimpleAction::new(action_name, None);
+        action.connect_activate({
+            let state = ui_state.clone();
+            let tag = tag.to_string();
+            move |_, _| apply_tag_to_selection(&state, tag.clone())
+        });
+        app.add_action(&action);
+        app.set_accels_for_action(&format!("app.{}", action_name), &[accel]);
+    }
+
+    // --- Proyectos recientes (Ctrl+1..5) ---
+    for i in 1u32..=5 {
+        let action = gio::SimpleAction::new(&format!("open-recent-{i}"), None);
+        action.connect_activate({
+            let settings = settings.clone();
+            let state = ui_state.clone();
+            move |_, _| {
+                let history: Vec<String> = settings
+                    .strv("history")
+                    .into_iter()
+                    .map(|s| s.to_string())
+                    .collect();
+                if let Some(path) = history.get((i - 1) as usize) {
+                    load_path(path, &state);
+                }
+            }
+        });
+        app.add_action(&action);
+        app.set_accels_for_action(
+            &format!("app.open-recent-{i}"),
+            &[&format!("<Control>{i}")],
+        );
+    }
 
     // --- Find / Replace bar signals ---
 
@@ -3539,7 +5055,7 @@ fn build_ui(app: &Application) {
         }
     });
     app.add_action(&find_replace_action);
-    app.set_accels_for_action("app.find-replace", &["<Control>h", "<Control>f"]);
+    app.set_accels_for_action("app.find-replace", &["<Control>f"]);
 
     // --- Actions: Add Resources ---
     let new_project_action = gio::SimpleAction::new("new-project", None);
@@ -3557,16 +5073,18 @@ fn build_ui(app: &Application) {
         move |_, _| show_import_chapters_dialog(&win, &state)
     });
     app.add_action(&import_chapters_action);
+    app.set_accels_for_action("app.import-chapters", &["<Control>t"]);
 
     let add_chapter_action = gio::SimpleAction::new("add-chapter", None);
     add_chapter_action.connect_activate({
         let win = window.clone();
         let state = ui_state.clone();
         move |_, _| {
-            show_add_resource_dialog(&win, &state, "Capítulo", "Text", "application/xhtml+xml");
+            show_add_chapters_dialog(&win, &state);
         }
     });
     app.add_action(&add_chapter_action);
+    app.set_accels_for_action("app.add-chapter", &["<Control>n"]);
 
     let add_style_action = gio::SimpleAction::new("add-style", None);
     add_style_action.connect_activate({
@@ -3623,7 +5141,7 @@ fn build_ui(app: &Application) {
         move |_, _| show_book_report(&state)
     });
     app.add_action(&book_report_action);
-    app.set_accels_for_action("app.book-report", &["<Control><Shift>i"]);
+    app.set_accels_for_action("app.book-report", &["<Control><Alt>i"]);
 
     // --- Export action ---
     let export_action = gio::SimpleAction::new("export", None);
@@ -3633,6 +5151,7 @@ fn build_ui(app: &Application) {
         move |_, _| show_export_dialog(&win, &state)
     });
     app.add_action(&export_action);
+    app.set_accels_for_action("app.export", &["<Control><Shift>t"]);
 
     // --- Nav builder action ---
     let nav_builder_action = gio::SimpleAction::new("nav-builder", None);
@@ -3642,6 +5161,7 @@ fn build_ui(app: &Application) {
         move |_, _| show_nav_builder_dialog(&win, &state)
     });
     app.add_action(&nav_builder_action);
+    app.set_accels_for_action("app.nav-builder", &["<Control><Shift>n"]);
 
     // --- EPUB check action + shortcut ---
     let epub_check_action = gio::SimpleAction::new("epub-check", None);
@@ -3651,6 +5171,15 @@ fn build_ui(app: &Application) {
     });
     app.add_action(&epub_check_action);
     app.set_accels_for_action("app.epub-check", &["<Control><Shift>v"]);
+
+    // --- Guardar archivo actual (Ctrl+S) ---
+    let save_action = gio::SimpleAction::new("save", None);
+    save_action.connect_activate({
+        let state = ui_state.clone();
+        move |_, _| save_current_item(&state)
+    });
+    app.add_action(&save_action);
+    app.set_accels_for_action("app.save", &["<Control>s"]);
 
     // --- Stats button ---
     stats_btn.connect_clicked({
@@ -3664,14 +5193,7 @@ fn build_ui(app: &Application) {
         let p = paned.clone();
         let s = settings.clone();
         move |_| {
-            if sidebar.is_visible() {
-                let _ = s.set_int("sidebar-width", p.position());
-                sidebar.set_visible(false);
-            } else {
-                sidebar.set_visible(true);
-                let saved = s.int("sidebar-width");
-                p.set_position(if saved > 10 { saved } else { 260 });
-            }
+            toggle_sidebar(&sidebar, &p, &s);
         }
     });
 
@@ -3902,6 +5424,15 @@ fn build_ui(app: &Application) {
         let s = settings.clone();
         move |win| {
             let _ = s.set_boolean("window-maximized", win.is_maximized());
+        }
+    });
+
+    // --- Guardar al cerrar la ventana ---
+    window.connect_close_request({
+        let state = ui_state.clone();
+        move |_| {
+            save_current_item(&state);
+            glib::Propagation::Proceed
         }
     });
 
