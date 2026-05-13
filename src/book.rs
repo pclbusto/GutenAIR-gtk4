@@ -186,6 +186,69 @@ pub(crate) fn save_current_item(state: &Rc<UiState>) {
     }
 }
 
+pub(crate) fn sync_chapter_styles_on_disk(core: &mut gutencore::GutenCore, chapter_ids: &[String]) {
+    if !core.config.auto_inject {
+        return;
+    }
+
+    let mut changed_any = false;
+    for chapter_id in chapter_ids {
+        let Some(item) = core.manifest.get(chapter_id) else {
+            continue;
+        };
+        if !item.media_type.contains("html") && !item.media_type.contains("xhtml") {
+            continue;
+        }
+
+        let full_path = match core.get_resource_path(chapter_id) {
+            Ok(path) => path,
+            Err(e) => {
+                eprintln!(
+                    "[Estilos] No se encontró la ruta de '{}': {}",
+                    chapter_id, e
+                );
+                continue;
+            }
+        };
+        let content = match std::fs::read_to_string(&full_path) {
+            Ok(content) => content,
+            Err(e) => {
+                eprintln!("[Estilos] No se pudo leer '{}': {}", chapter_id, e);
+                continue;
+            }
+        };
+        let synced = sync_stylesheet_links(&content, core, chapter_id);
+        if synced == content {
+            continue;
+        }
+        if let Err(e) = std::fs::write(&full_path, synced) {
+            eprintln!("[Estilos] No se pudo actualizar '{}': {}", chapter_id, e);
+            continue;
+        }
+        changed_any = true;
+    }
+
+    if changed_any {
+        if let Err(e) = core.build_index() {
+            eprintln!("[Estilos] No se pudo reconstruir el índice: {}", e);
+        }
+    }
+}
+
+pub(crate) fn reload_open_item_if_affected(state: &Rc<UiState>, item_ids: &[String]) {
+    let Some(open_id) = state.open_item_id.borrow().clone() else {
+        return;
+    };
+    if !item_ids.iter().any(|id| id == &open_id) {
+        return;
+    }
+    let Some(media_type) = state.open_item_media_type.borrow().clone() else {
+        return;
+    };
+
+    load_item_without_saving(state, &open_id, &media_type);
+}
+
 pub(crate) fn open_item(state: &Rc<UiState>, item_id: &str, media_type: &str) {
     // Save previous item if exists
     save_current_item(state);

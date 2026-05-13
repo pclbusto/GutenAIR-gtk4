@@ -43,7 +43,7 @@ pub(crate) fn update_group_visuals(group_rows: &Rc<RefCell<GroupRows>>, state: &
     }
 }
 
-/// Reemplaza los `<link rel="stylesheet">` del <head> con los que indica el config.
+/// Reemplaza los `<link rel="stylesheet">` del `<head>` con los que indica el config.
 /// Solo toca esas líneas; el resto del contenido queda intacto.
 
 pub(crate) fn show_context_popover(parent: gtk::Widget, x: f64, y: f64, state: &Rc<UiState>) {
@@ -495,6 +495,8 @@ pub(crate) fn show_style_manager_dialog(state: &Rc<UiState>) {
     let selected_ids_c = selected_ids.clone();
     let win_c = win.clone();
     apply_btn.connect_clicked(move |_| {
+        save_current_item(&state_c);
+
         let path = match state_c.current_path.borrow().clone() {
             Some(p) => p,
             None => return,
@@ -528,7 +530,12 @@ pub(crate) fn show_style_manager_dialog(state: &Rc<UiState>) {
 
         if let Err(e) = core.save() {
             eprintln!("style_manager save: {}", e);
+            return;
         }
+
+        sync_chapter_styles_on_disk(&mut core, &selected_ids_c);
+        reload_open_item_if_affected(&state_c, &selected_ids_c);
+
         win_c.close();
     });
 
@@ -574,25 +581,28 @@ pub(crate) fn show_delete_confirm_dialog(state: &Rc<UiState>, items: Vec<(String
         let mut core = match gutencore::GutenCore::open_folder(&path) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("delete: {}", e);
+                show_error_dialog(
+                    &state_c.window,
+                    "Eliminar archivos",
+                    &format!("No se pudo abrir el proyecto: {}", e),
+                );
                 return;
             }
         };
 
         let open_id = state_c.open_item_id.borrow().clone();
-        let mut cleared_editor = false;
+        let selected_ids: Vec<String> = items.iter().map(|(_, item_id)| item_id.clone()).collect();
+        let cleared_editor = open_id
+            .as_ref()
+            .map(|id| selected_ids.iter().any(|selected_id| selected_id == id))
+            .unwrap_or(false);
 
-        for (_, item_id) in &items {
-            if let Err(e) = core.delete_item(item_id) {
-                eprintln!("delete {}: {}", item_id, e);
+        if let Err(e) = core.delete_items_and_save(&selected_ids) {
+            show_error_dialog(&state_c.window, "Eliminar archivos", &e.to_string());
+            if let Ok(fresh_core) = gutencore::GutenCore::open_folder(&path) {
+                populate_sidebar(&state_c, &fresh_core);
             }
-            if open_id.as_deref() == Some(item_id) {
-                cleared_editor = true;
-            }
-        }
-
-        if let Err(e) = core.save() {
-            eprintln!("delete save: {}", e);
+            return;
         }
 
         if cleared_editor {
@@ -610,10 +620,8 @@ pub(crate) fn show_delete_confirm_dialog(state: &Rc<UiState>, items: Vec<(String
         }
 
         state_c.selected_items.borrow_mut().clear();
-
-        if let Ok(fresh_core) = gutencore::GutenCore::open_folder(&path) {
-            populate_sidebar(&state_c, &fresh_core);
-        }
+        *state_c.last_clicked.borrow_mut() = None;
+        populate_sidebar(&state_c, &core);
     });
 
     dialog.present(Some(&state.window));

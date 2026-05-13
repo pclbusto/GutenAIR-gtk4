@@ -36,11 +36,13 @@ Asegúrate de tener instaladas las dependencias de desarrollo de GTK4, Libadwait
 sudo dnf install gtk4-devel libadwaita-devel webkit6gtk-devel gtksourceview5-devel
 ```
 
+> **Nota:** este repositorio usa `gutencore` como dependencia local en `../GutenAIR`. Si el core está en otra ubicación, ajustá la ruta en `Cargo.toml`.
+
 ### Compilación desde el origen
 
 1.  Clona el repositorio:
     ```bash
-    git clone https://github.com/tu-usuario/GutenAIR-gtk4.git
+    git clone https://github.com/pedro/GutenAIR-gtk4.git
     cd GutenAIR-gtk4
     ```
 
@@ -53,6 +55,21 @@ sudo dnf install gtk4-devel libadwaita-devel webkit6gtk-devel gtksourceview5-dev
     ```bash
     cargo run
     ```
+
+## 📖 Documentación
+
+La documentación larga del proyecto vive en [`docs/`](docs/) y está pensada para generarse con [mdBook](https://rust-lang.github.io/mdBook/):
+
+```bash
+cargo install mdbook
+mdbook serve docs
+```
+
+También podés generar documentación Rust con:
+
+```bash
+cargo doc --no-deps
+```
 
 ## 📸 Capturas de Pantalla
 
