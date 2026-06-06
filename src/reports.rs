@@ -21,7 +21,7 @@ pub(crate) fn show_chapter_report(state: &Rc<UiState>) {
         _ => return,
     };
 
-    let core = match gutencore::GutenCore::open_folder(&path) {
+    let core = match gutencore::GutenCore::open_folder_quick(&path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("chapter report: {}", e);
@@ -111,7 +111,7 @@ pub(crate) fn show_book_report(state: &Rc<UiState>) {
         None => return,
     };
 
-    let core = match gutencore::GutenCore::open_folder(&path) {
+    let core = match gutencore::GutenCore::open_folder_quick(&path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("book report: {}", e);

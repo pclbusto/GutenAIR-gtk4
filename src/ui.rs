@@ -244,6 +244,8 @@ pub(crate) fn build_ui(app: &Application) {
     let menu = gio::Menu::new();
     menu.append(Some("Preferencias"), Some("app.preferences"));
     menu.append(Some("Exportar…"), Some("app.export"));
+    menu.append(Some("Buscar en el libro…"), Some("app.book-search"));
+    menu.append(Some("Reemplazar en el libro…"), Some("app.book-replace"));
     menu.append(Some("Tabla de Contenidos…"), Some("app.nav-builder"));
     menu.append(Some("Verificar EPUB"), Some("app.epub-check"));
     menu.append(Some("Atajos de teclado"), Some("app.shortcuts"));
@@ -301,6 +303,7 @@ pub(crate) fn build_ui(app: &Application) {
         selected_items: RefCell::new(Vec::new()),
         last_clicked: RefCell::new(None),
         search_ctx: search_ctx.clone(),
+        search_settings: search_settings.clone(),
     });
 
     setup_editor_context_menu(&ui_state);
@@ -702,6 +705,23 @@ pub(crate) fn build_ui(app: &Application) {
     });
     app.add_action(&epub_check_action);
     app.set_accels_for_action("app.epub-check", &["<Control><Shift>v"]);
+
+    // --- Book-wide search (Ctrl+Shift+F) and replace (Ctrl+Shift+R) ---
+    let book_search_action = gio::SimpleAction::new("book-search", None);
+    book_search_action.connect_activate({
+        let state = ui_state.clone();
+        move |_, _| show_book_search_dialog(&state, false)
+    });
+    app.add_action(&book_search_action);
+    app.set_accels_for_action("app.book-search", &["<Control><Shift>f"]);
+
+    let book_replace_action = gio::SimpleAction::new("book-replace", None);
+    book_replace_action.connect_activate({
+        let state = ui_state.clone();
+        move |_, _| show_book_search_dialog(&state, true)
+    });
+    app.add_action(&book_replace_action);
+    app.set_accels_for_action("app.book-replace", &["<Control><Shift>r"]);
 
     // --- Guardar archivo actual (Ctrl+S) ---
     let save_action = gio::SimpleAction::new("save", None);

@@ -101,7 +101,7 @@ pub(crate) fn show_context_popover(parent: gtk::Widget, x: f64, y: f64, state: &
             .current_path
             .borrow()
             .as_ref()
-            .and_then(|p| gutencore::GutenCore::open_folder(p).ok())
+            .and_then(|p| gutencore::GutenCore::open_folder_quick(p).ok())
             .and_then(|core| core.manifest.get(&item_id).map(|i| i.media_type.clone()))
             .unwrap_or_default();
         let is_xhtml = media_type.contains("html") || media_type.contains("xhtml");
@@ -130,7 +130,7 @@ pub(crate) fn show_context_popover(parent: gtk::Widget, x: f64, y: f64, state: &
                     Some(p) => p,
                     None => return,
                 };
-                let mut core = match gutencore::GutenCore::open_folder(&path) {
+                let mut core = match gutencore::GutenCore::open_folder_quick(&path) {
                     Ok(c) => c,
                     Err(e) => {
                         eprintln!("set_cover: {}", e);
@@ -152,7 +152,7 @@ pub(crate) fn show_context_popover(parent: gtk::Widget, x: f64, y: f64, state: &
                     eprintln!("set_cover save ERROR: {}", e);
                     return;
                 }
-                if let Ok(fresh_core) = gutencore::GutenCore::open_folder(&path) {
+                if let Ok(fresh_core) = gutencore::GutenCore::open_folder_quick(&path) {
                     populate_sidebar(&state_c, &fresh_core);
                 }
             });
@@ -195,7 +195,7 @@ pub(crate) fn show_context_popover(parent: gtk::Widget, x: f64, y: f64, state: &
                         Some(p) => p,
                         None => return,
                     };
-                    let core = match gutencore::GutenCore::open_folder(&path) {
+                    let core = match gutencore::GutenCore::open_folder_quick(&path) {
                         Ok(c) => c,
                         Err(e) => {
                             eprintln!("paste especial: {}", e);
@@ -237,7 +237,7 @@ pub(crate) fn show_context_popover(parent: gtk::Widget, x: f64, y: f64, state: &
             .current_path
             .borrow()
             .as_ref()
-            .and_then(|p| gutencore::GutenCore::open_folder(p).ok())
+            .and_then(|p| gutencore::GutenCore::open_folder_quick(p).ok())
             .map(|core| {
                 state.selected_items.borrow().iter().all(|(_, id)| {
                     core.manifest
@@ -321,7 +321,7 @@ pub(crate) fn show_style_manager_dialog(state: &Rc<UiState>) {
         return;
     }
 
-    let core = match gutencore::GutenCore::open_folder(&path) {
+    let core = match gutencore::GutenCore::open_folder_quick(&path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("style_manager: {}", e);
@@ -501,7 +501,7 @@ pub(crate) fn show_style_manager_dialog(state: &Rc<UiState>) {
             Some(p) => p,
             None => return,
         };
-        let mut core = match gutencore::GutenCore::open_folder(&path) {
+        let mut core = match gutencore::GutenCore::open_folder_quick(&path) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("style_manager apply: {}", e);
@@ -578,7 +578,7 @@ pub(crate) fn show_delete_confirm_dialog(state: &Rc<UiState>, items: Vec<(String
             Some(p) => p,
             None => return,
         };
-        let mut core = match gutencore::GutenCore::open_folder(&path) {
+        let mut core = match gutencore::GutenCore::open_folder_quick(&path) {
             Ok(c) => c,
             Err(e) => {
                 show_error_dialog(
@@ -599,7 +599,7 @@ pub(crate) fn show_delete_confirm_dialog(state: &Rc<UiState>, items: Vec<(String
 
         if let Err(e) = core.delete_items_and_save(&selected_ids) {
             show_error_dialog(&state_c.window, "Eliminar archivos", &e.to_string());
-            if let Ok(fresh_core) = gutencore::GutenCore::open_folder(&path) {
+            if let Ok(fresh_core) = gutencore::GutenCore::open_folder_quick(&path) {
                 populate_sidebar(&state_c, &fresh_core);
             }
             return;
@@ -637,7 +637,7 @@ pub(crate) fn show_rename_dialog(state: &Rc<UiState>) {
         Some(p) => p,
         None => return,
     };
-    let core = match gutencore::GutenCore::open_folder(&path) {
+    let core = match gutencore::GutenCore::open_folder_quick(&path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("rename: {}", e);
@@ -844,7 +844,7 @@ pub(crate) fn show_rename_dialog(state: &Rc<UiState>) {
             let digits = digits_spin.value_as_int() as usize;
 
             if let Some(p) = state_d.current_path.borrow().clone() {
-                match gutencore::GutenCore::open_folder(&p) {
+                match gutencore::GutenCore::open_folder_quick(&p) {
                     Ok(mut core) => {
                         let mut renames = HashMap::new();
                         for (i, (id, folder, _, ext)) in items_rc.iter().enumerate() {
@@ -938,7 +938,7 @@ pub(crate) fn show_default_styles_popover(btn: &Button, state: &Rc<UiState>) {
         Some(p) => p,
         None => return,
     };
-    let core = match gutencore::GutenCore::open_folder(&path) {
+    let core = match gutencore::GutenCore::open_folder_quick(&path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("default_styles popover: {}", e);
@@ -1045,7 +1045,7 @@ pub(crate) fn show_default_styles_popover(btn: &Button, state: &Rc<UiState>) {
             Some(p) => p,
             None => return,
         };
-        let mut core = match gutencore::GutenCore::open_folder(&path) {
+        let mut core = match gutencore::GutenCore::open_folder_quick(&path) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("default_styles apply: {}", e);
@@ -1255,7 +1255,7 @@ pub(crate) fn populate_sidebar(state: &Rc<UiState>, core: &gutencore::GutenCore)
                         Some(p) => p,
                         None => return false,
                     };
-                    let mut core = match gutencore::GutenCore::open_folder(&path) {
+                    let mut core = match gutencore::GutenCore::open_folder_quick(&path) {
                         Ok(c) => c,
                         Err(e) => {
                             eprintln!("DnD: error abriendo libro: {}", e);
@@ -1290,6 +1290,7 @@ pub(crate) fn populate_sidebar(state: &Rc<UiState>, core: &gutencore::GutenCore)
             {
                 let gesture = GestureClick::new();
                 gesture.set_button(0); // all buttons
+                gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
 
                 let state_g = state.clone();
                 let item_id = item.id.clone();
@@ -1298,6 +1299,10 @@ pub(crate) fn populate_sidebar(state: &Rc<UiState>, core: &gutencore::GutenCore)
                 let item_media = item.media_type.clone();
 
                 gesture.connect_released(move |gest, _n, x, y| {
+                    // Claim the sequence so the internal ActionRow gesture doesn't
+                    // also fire and overwrite our selection / multiselect logic.
+                    gest.set_state(gtk::EventSequenceState::Claimed);
+
                     let button = gest.current_button();
                     let modifiers = gest.current_event_state();
                     let ctrl = modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK);
@@ -1389,6 +1394,22 @@ pub(crate) fn populate_sidebar(state: &Rc<UiState>, core: &gutencore::GutenCore)
                 });
 
                 action_row.add_controller(gesture);
+            }
+
+            // Activación por teclado (Enter/Espacio) — misma lógica que click normal
+            {
+                let state_a = state.clone();
+                let item_id_a = item.id.clone();
+                let folder_a = folder.clone();
+                let group_rows_a = group_rows.clone();
+                let item_media_a = item.media_type.clone();
+                action_row.connect_activated(move |_| {
+                    state_a.selected_items.borrow_mut().clear();
+                    *state_a.last_clicked.borrow_mut() =
+                        Some((folder_a.clone(), item_id_a.clone()));
+                    update_group_visuals(&group_rows_a, &state_a);
+                    open_item(&state_a, &item_id_a, &item_media_a);
+                });
             }
 
             expander.add_row(&action_row);
@@ -1544,7 +1565,7 @@ pub(crate) fn populate_sidebar(state: &Rc<UiState>, core: &gutencore::GutenCore)
 
 pub(crate) fn refresh_sidebar(ui_state: &Rc<UiState>) {
     if let Some(path) = ui_state.current_path.borrow().clone() {
-        if let Ok(core) = gutencore::GutenCore::open_folder(&path) {
+        if let Ok(core) = gutencore::GutenCore::open_folder_quick(&path) {
             populate_sidebar(ui_state, &core);
         }
     }

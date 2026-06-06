@@ -38,6 +38,7 @@ pub(crate) struct UiState {
     pub(crate) selected_items: RefCell<Vec<(String, String)>>, // (folder, id)
     pub(crate) last_clicked: RefCell<Option<(String, String)>>, // anchor for shift-click
     pub(crate) search_ctx: sourceview5::SearchContext,
+    pub(crate) search_settings: sourceview5::SearchSettings,
 }
 
 // ─── App entry ───────────────────────────────────────────────────────────────

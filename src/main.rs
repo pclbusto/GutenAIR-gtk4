@@ -9,6 +9,7 @@ mod preferences;
 mod prelude;
 mod reports;
 mod resources;
+mod search;
 mod sidebar;
 mod state;
 mod ui;

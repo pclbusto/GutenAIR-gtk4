@@ -145,7 +145,7 @@ pub(crate) fn split_paragraph_at_cursor(state: &Rc<UiState>) {
 
     save_current_item(state);
 
-    let mut core = match gutencore::GutenCore::open_folder(&path) {
+    let mut core = match gutencore::GutenCore::open_folder_quick(&path) {
         Ok(core) => core,
         Err(e) => {
             show_error_dialog(
@@ -592,7 +592,9 @@ pub(crate) fn show_shortcuts_dialog(parent: &ApplicationWindow) {
     dialog.add(shortcuts_section(
         "Edición",
         &[
-            ("Buscar/reemplazar", "<Control>f"),
+            ("Buscar/reemplazar en el archivo", "<Control>f"),
+            ("Buscar en el libro", "<Control><Shift>f"),
+            ("Reemplazar en el libro", "<Control><Shift>r"),
             ("Asistente IA", "<Control><Shift>i"),
             ("Dividir párrafo", "<Control>d"),
             ("Dividir capítulo", "<Control><Shift>d"),
@@ -668,7 +670,7 @@ pub(crate) fn setup_editor_context_menu(state: &Rc<UiState>) {
             "[Menu] Buscando estilos para el capítulo: {} en {}",
             item_id, path_str
         );
-        if let Ok(core) = gutencore::GutenCore::open_folder(&path_str) {
+        if let Ok(core) = gutencore::GutenCore::open_folder_quick(&path_str) {
             // Log CSS IDs from config (default_styles / exceptions)
             let config_style_ids = core.get_chapter_styles(&item_id);
             println!(

@@ -134,7 +134,7 @@ pub(crate) fn save_current_item(state: &Rc<UiState>) {
     }
 
     if let (Some(item_id), Some(path_str)) = (item_id_opt, path_opt) {
-        let core = match gutencore::GutenCore::open_folder(&path_str) {
+        let core = match gutencore::GutenCore::open_folder_quick(&path_str) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!(
@@ -257,7 +257,7 @@ pub(crate) fn open_item(state: &Rc<UiState>, item_id: &str, media_type: &str) {
 
 pub(crate) fn load_item_without_saving(state: &Rc<UiState>, item_id: &str, media_type: &str) {
     if let Some(path_str) = state.current_path.borrow().clone() {
-        if let Ok(core) = gutencore::GutenCore::open_folder(&path_str) {
+        if let Ok(core) = gutencore::GutenCore::open_folder_quick(&path_str) {
             if let Ok(full_path) = core.get_resource_path(item_id) {
                 let filename = full_path
                     .file_name()

@@ -6,7 +6,7 @@ pub(crate) fn show_epub_check(state: &Rc<UiState>) {
         None => return,
     };
 
-    let core = match gutencore::GutenCore::open_folder(&path) {
+    let core = match gutencore::GutenCore::open_folder_quick(&path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("epub-check: {}", e);

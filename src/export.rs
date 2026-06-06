@@ -73,7 +73,7 @@ pub(crate) fn show_export_epub_dialog(parent: &impl IsA<gtk::Window>, state: &Rc
 
     // Nombre sugerido: título del libro o nombre de carpeta
     let suggested = {
-        let core = gutencore::GutenCore::open_folder(&path).ok();
+        let core = gutencore::GutenCore::open_folder_quick(&path).ok();
         core.and_then(|c| c.metadata.as_ref().map(|m| m.title.clone()))
             .unwrap_or_else(|| {
                 std::path::Path::new(&path)
@@ -108,7 +108,7 @@ pub(crate) fn show_export_epub_dialog(parent: &impl IsA<gtk::Window>, state: &Rc
             out_path
         };
 
-        let mut core = match gutencore::GutenCore::open_folder(
+        let mut core = match gutencore::GutenCore::open_folder_quick(
             &state_c.current_path.borrow().clone().unwrap_or_default(),
         ) {
             Ok(c) => c,
@@ -133,7 +133,7 @@ pub(crate) fn show_export_text_dialog(parent: &impl IsA<gtk::Window>, state: &Rc
         None => return,
     };
 
-    let core = match gutencore::GutenCore::open_folder(&path) {
+    let core = match gutencore::GutenCore::open_folder_quick(&path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("export: {}", e);
@@ -323,7 +323,7 @@ pub(crate) fn show_export_text_dialog(parent: &impl IsA<gtk::Window>, state: &Rc
                 return;
             }
 
-            if let Ok(core) = gutencore::GutenCore::open_folder(&path) {
+            if let Ok(core) = gutencore::GutenCore::open_folder_quick(&path) {
                 let dir = output_dir.borrow().clone();
                 match core.export_to_text_file(&dir, None, Some(selected_ids)) {
                     Ok(out_path) => eprintln!("export: guardado en {}", out_path.display()),

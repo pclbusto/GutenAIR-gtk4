@@ -52,7 +52,7 @@ pub(crate) fn show_nav_builder_dialog(parent: &impl IsA<gtk::Window>, state: &Rc
         None => return,
     };
 
-    let core = match gutencore::GutenCore::open_folder(&project_path) {
+    let core = match gutencore::GutenCore::open_folder_quick(&project_path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("nav: {}", e);
@@ -416,7 +416,7 @@ pub(crate) fn show_nav_builder_dialog(parent: &impl IsA<gtk::Window>, state: &Rc
         let data = toc.borrow().clone();
         save_nav_state(&path, &data);
 
-        let mut core = match gutencore::GutenCore::open_folder(&path) {
+        let mut core = match gutencore::GutenCore::open_folder_quick(&path) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("nav gen: {}", e);
@@ -425,13 +425,7 @@ pub(crate) fn show_nav_builder_dialog(parent: &impl IsA<gtk::Window>, state: &Rc
         };
         match core.build_nav_from_data(&data) {
             Ok(_) => match core.save() {
-                Ok(_) => {
-                    if let Err(e) = core.build_nav_from_data(&data) {
-                        eprintln!("nav gen ERROR después de save: {}", e);
-                    } else {
-                        eprintln!("nav: generado y guardado");
-                    }
-                }
+                Ok(_) => eprintln!("nav: generado y guardado"),
                 Err(e) => eprintln!("nav save: {}", e),
             },
             Err(e) => eprintln!("nav gen ERROR: {}", e),

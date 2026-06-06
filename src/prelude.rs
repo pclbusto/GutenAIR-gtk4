@@ -30,6 +30,7 @@ pub(crate) use crate::nav::*;
 pub(crate) use crate::preferences::*;
 pub(crate) use crate::reports::*;
 pub(crate) use crate::resources::*;
+pub(crate) use crate::search::*;
 pub(crate) use crate::sidebar::*;
 pub(crate) use crate::state::*;
 pub(crate) use crate::ui::*;

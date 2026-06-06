@@ -31,7 +31,7 @@ pub(crate) fn show_import_chapters_dialog(parent: &impl IsA<gtk::Window>, state:
                 return;
             }
 
-            match gutencore::GutenCore::open_folder(&path) {
+            match gutencore::GutenCore::open_folder_quick(&path) {
                 Err(e) => eprintln!("import chapters: {}", e),
                 Ok(mut core) => {
                     let mut imported = 0;
@@ -366,7 +366,7 @@ pub(crate) fn show_split_chapter_dialog(
             };
 
             if !new_id.is_empty() && !split_id.is_empty() {
-                if let Ok(mut core) = gutencore::GutenCore::open_folder(&path) {
+                if let Ok(mut core) = gutencore::GutenCore::open_folder_quick(&path) {
                     let options = gutencore::SplitChapterOptions {
                         source_id: source_id.clone(),
                         new_id: new_id.clone(),
@@ -477,7 +477,7 @@ pub(crate) fn show_add_chapters_dialog(parent: &impl IsA<gtk::Window>, state: &R
             let digits = digits_row.value() as usize;
 
             if !prefix.is_empty() && quantity > 0 {
-                if let Ok(mut core) = gutencore::GutenCore::open_folder(&path) {
+                if let Ok(mut core) = gutencore::GutenCore::open_folder_quick(&path) {
                     for i in 0..quantity {
                         let n = start + i;
                         let id = format!("{}{:0width$}", prefix, n, width = digits);
@@ -536,7 +536,7 @@ pub(crate) fn show_add_resource_dialog(
         if res == ResponseType::Accept {
             let id = entry.text().to_string();
             if !id.is_empty() {
-                if let Ok(mut core) = gutencore::GutenCore::open_folder(&path) {
+                if let Ok(mut core) = gutencore::GutenCore::open_folder_quick(&path) {
                     let result = if mime_owned == "application/xhtml+xml" {
                         core.add_document(&id, "<h1>Nuevo Capítulo</h1>")
                             .and_then(|_| {
@@ -617,7 +617,7 @@ pub(crate) fn show_import_dialog(
                 return;
             }
 
-            if let Ok(mut core) = gutencore::GutenCore::open_folder(&path) {
+            if let Ok(mut core) = gutencore::GutenCore::open_folder_quick(&path) {
                 let mut imported = 0;
                 for i in 0..count {
                     let file = match files.item(i).and_then(|o| o.downcast::<gio::File>().ok()) {
